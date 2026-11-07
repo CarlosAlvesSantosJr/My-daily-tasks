@@ -718,10 +718,11 @@ $('enable-push').addEventListener('click', async () => {
   button.textContent = label;
 });
 
-/* Previsão do tempo no rodapé */
+/* Previsão do tempo no cabeçalho */
 
 const WEATHER_REFRESH_MS = 30 * 60 * 1000;
-const PRECISE_KEY = 'weather-precise'; // o usuário já autorizou o GPS
+// Última posição que o aparelho informou, usada quando o GPS falha.
+const LAST_POSITION_KEY = 'weather-last-position';
 
 // Códigos WMO usados pela Open-Meteo: [códigos, ícone de dia, de noite, descrição].
 const WEATHER_CODES = [
@@ -744,20 +745,21 @@ function describeWeather(code, isDay) {
   return { icon: isDay ? entry[1] : entry[2], label: entry[3] };
 }
 
-function readPrecise() {
+function readLastPosition() {
   try {
-    return localStorage.getItem(PRECISE_KEY) === '1';
+    const saved = JSON.parse(localStorage.getItem(LAST_POSITION_KEY));
+    if (Number.isFinite(saved?.lat) && Number.isFinite(saved?.lon)) return saved;
   } catch {
-    return false;
+    // Sem armazenamento ou valor corrompido: segue sem a última posição.
   }
+  return null;
 }
 
-function savePrecise(precise) {
+function saveLastPosition(position) {
   try {
-    if (precise) localStorage.setItem(PRECISE_KEY, '1');
-    else localStorage.removeItem(PRECISE_KEY);
+    localStorage.setItem(LAST_POSITION_KEY, JSON.stringify(position));
   } catch {
-    // Sem armazenamento, só pergunta de novo da próxima vez.
+    // Sem armazenamento, só não lembra a posição.
   }
 }
 
@@ -768,11 +770,14 @@ function currentPosition() {
       return;
     }
     navigator.geolocation.getCurrentPosition(
-      ({ coords }) => resolve(coords),
+      ({ coords }) => resolve({
+        lat: Number(coords.latitude.toFixed(4)),
+        lon: Number(coords.longitude.toFixed(4)),
+      }),
       (err) => reject(new Error(err.code === err.PERMISSION_DENIED
         ? 'Permissão de localização negada.'
         : 'Não foi possível obter a localização.')),
-      { timeout: 10000, maximumAge: WEATHER_REFRESH_MS },
+      { timeout: 10000, maximumAge: 5 * 60 * 1000 },
     );
   });
 }
@@ -781,23 +786,25 @@ let weatherTimer;
 let weatherLoadedAt = 0;
 
 /**
- * Sem GPS autorizado, usa o local aproximado pelo IP, sem pedir permissão.
- * Tocar no nome da cidade pede o GPS e lembra a escolha neste aparelho.
+ * Usa a localização atual do aparelho. Se ela falhar, usa a última que o
+ * aparelho informou; sem nenhuma, o servidor estima o local pelo IP.
  */
 async function loadWeather({ askLocation = false } = {}) {
-  let precise = askLocation || readPrecise();
-  let path = '/api/weather';
-  if (precise) {
-    try {
-      const { latitude, longitude } = await currentPosition();
-      path += `?lat=${latitude.toFixed(4)}&lon=${longitude.toFixed(4)}`;
-    } catch (err) {
-      precise = false;
-      savePrecise(false);
-      if (askLocation) showToast(`${err.message} Usando o local aproximado.`);
+  let position = null;
+  let precise = false;
+  try {
+    position = await currentPosition();
+    saveLastPosition(position);
+    precise = true;
+  } catch (err) {
+    position = readLastPosition();
+    if (askLocation) {
+      const fallback = position ? 'Usando o último local conhecido.' : 'Usando o local aproximado.';
+      showToast(`${err.message} ${fallback}`);
     }
   }
 
+  const path = position ? `/api/weather?lat=${position.lat}&lon=${position.lon}` : '/api/weather';
   let report;
   try {
     report = await api(path);
@@ -807,7 +814,6 @@ async function loadWeather({ askLocation = false } = {}) {
   }
   if (!state.userName) return; // saiu enquanto carregava
 
-  savePrecise(precise);
   weatherLoadedAt = Date.now();
   renderWeather(report, precise);
 }
@@ -818,18 +824,17 @@ function renderWeather({ place, temperature, weatherCode, isDay, max, min, rainC
   const placeName = place || 'Seu local';
 
   $('weather-icon').textContent = icon;
-  const text = $('weather-text');
-  const now = document.createElement('strong');
-  now.textContent = `${temperature}°`;
+  $('weather-temp').textContent = `${temperature}°`;
   const detail = document.createElement('span');
   detail.className = 'weather-label';
-  detail.textContent = label ? ` ${label}` : '';
-  text.replaceChildren(now, detail, ` · ${max}°/${min}°${rain}`);
+  detail.textContent = label ? `${label} · ` : '';
+  const chance = document.createElement('span');
+  chance.className = 'weather-rain';
+  chance.textContent = rainChance === null ? '' : `chuva ${rainChance}%`;
+  $('weather-text').replaceChildren(detail, `${max}°/${min}°`, chance);
 
   $('weather-place-name').textContent = placeName;
-  const button = $('weather-place');
-  button.classList.toggle('precise', precise);
-  button.title = precise ? 'Atualizar pela localização do aparelho' : 'Usar a localização do aparelho';
+  $('weather-place').classList.toggle('precise', precise);
   $('weather').title = `${placeName}: ${temperature}°, ${label || 'agora'}. `
     + `Máxima ${max}°, mínima ${min}°${rain.replace(' · c', '. C')}.`;
   $('weather').hidden = false;

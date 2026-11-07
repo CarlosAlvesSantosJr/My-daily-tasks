@@ -1,11 +1,12 @@
 'use strict';
 
-const CACHE = 'shell-v1';
+const CACHE = 'shell-v2';
 const SHELL = [
   '/',
   '/style.css',
   '/app.js',
   '/icon.svg',
+  '/bg.jpg',
   '/manifest.webmanifest',
   '/icons/icon-192.png',
 ];

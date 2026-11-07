@@ -155,8 +155,14 @@ test('lista de mercado é a mesma para os dois usuários', async () => {
   const seenByAna = await (await request('GET', '/api/market', { cookie: ana })).json();
   const seenByBia = await (await request('GET', '/api/market', { cookie: bia })).json();
   assert.deepEqual(seenByAna, seenByBia);
-  assert.deepEqual(seenByAna.items.map((item) => item.text), ['Pão', 'Leite']);
+  assert.deepEqual(seenByAna.items.map((item) => item.text), ['PÃO', 'LEITE']);
   assert.deepEqual(seenByAna.items.map((item) => item.addedBy), ['Bia', 'Ana']);
+});
+
+test('itens de mercado ficam em maiúsculas, inclusive acentos', async () => {
+  const cookie = await login('ana', 'senha-ana');
+  const { items: [item] } = await addItem(cookie, 'feijão preto');
+  assert.equal(item.text, 'FEIJÃO PRETO');
 });
 
 test('um usuário marca e apaga item adicionado pelo outro', async () => {
@@ -181,7 +187,7 @@ test('apagar comprados mantém os itens que faltam', async () => {
   await request('PATCH', `/api/market/${item.id}`, { cookie, body: { bought: true } });
 
   const response = await request('POST', '/api/market/clear-bought', { cookie });
-  assert.deepEqual((await response.json()).items.map((other) => other.text), ['Falta']);
+  assert.deepEqual((await response.json()).items.map((other) => other.text), ['FALTA']);
 });
 
 test('item de mercado inválido é recusado', async () => {
@@ -242,8 +248,8 @@ test('item novo chega em tempo real para o outro usuário', async () => {
   await addItem(ana, 'Café');
   const update = await socket.next();
   socket.close();
-  assert.deepEqual(update.items.map((item) => item.text), ['Café']);
-  assert.deepEqual(update.event, { by: 'Ana', text: 'Café' });
+  assert.deepEqual(update.items.map((item) => item.text), ['CAFÉ']);
+  assert.deepEqual(update.event, { by: 'Ana', text: 'CAFÉ' });
   assert.ok(update.version > initial.version);
 });
 
@@ -253,7 +259,7 @@ test('quem conecta depois recebe a lista atual', async () => {
   const socket = connectLive(await login('bia', 'senha-bia'));
   const { items } = await socket.next();
   socket.close();
-  assert.deepEqual(items.map((item) => item.text), ['Arroz']);
+  assert.deepEqual(items.map((item) => item.text), ['ARROZ']);
 });
 
 test('tempo real exige login e a mesma origem', async () => {
@@ -283,7 +289,7 @@ test('notificação vai só para o outro usuário', async () => {
 
   assert.deepEqual(pushed, [{
     endpoint: subscription('celular-bia').endpoint,
-    message: { title: 'Lista de mercado', body: 'Ana adicionou Ovos' },
+    message: { title: 'Lista de mercado', body: 'Ana adicionou OVOS' },
   }]);
 });
 
@@ -506,8 +512,8 @@ test('cada usuário vê apenas a própria lista', async () => {
 
   const anaTodos = await (await request('GET', '/api/todos', { cookie: ana })).json();
   const biaTodos = await (await request('GET', '/api/todos', { cookie: bia })).json();
-  assert.deepEqual(anaTodos.map((todo) => todo.text), ['tarefa da Ana']);
-  assert.deepEqual(biaTodos.map((todo) => todo.text), ['tarefa da Bia']);
+  assert.deepEqual(anaTodos.map((todo) => todo.text), ['TAREFA DA ANA']);
+  assert.deepEqual(biaTodos.map((todo) => todo.text), ['TAREFA DA BIA']);
 });
 
 test('um usuário não altera nem apaga tarefa do outro usando o id', async () => {
@@ -562,7 +568,7 @@ test('apagar concluídas só afeta a própria lista', async () => {
 test('criar, editar, concluir e apagar tarefa', async () => {
   const cookie = await login('ana', 'senha-ana');
   const todo = await addTodo(cookie, '  comprar pão  ');
-  assert.equal(todo.text, 'comprar pão');
+  assert.equal(todo.text, 'COMPRAR PÃO');
   assert.equal(todo.done, false);
 
   const edited = await request('PATCH', `/api/todos/${todo.id}`, {
@@ -570,7 +576,7 @@ test('criar, editar, concluir e apagar tarefa', async () => {
     body: { text: 'comprar leite', done: true },
   });
   const updated = await edited.json();
-  assert.equal(updated.text, 'comprar leite');
+  assert.equal(updated.text, 'COMPRAR LEITE');
   assert.equal(updated.done, true);
 
   const removed = await request('DELETE', `/api/todos/${todo.id}`, { cookie });

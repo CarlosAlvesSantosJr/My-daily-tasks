@@ -42,6 +42,20 @@
           <p id="today" class="muted date"></p>
           <h1>Olá, <span id="user-name"></span></h1>
         </div>
+        <div id="weather" class="weather" hidden>
+          <p class="weather-now">
+            <span id="weather-icon" class="weather-icon" aria-hidden="true"></span>
+            <strong id="weather-temp" class="weather-temp"></strong>
+          </p>
+          <p id="weather-text" class="weather-text"></p>
+          <button id="weather-place" class="weather-place" type="button"
+                  title="Atualizar pela localização do aparelho">
+            <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+              <path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11z M12 12.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+            </svg>
+            <span id="weather-place-name"></span>
+          </button>
+        </div>
         <button id="logout" class="ghost" type="button">Sair</button>
       </div>
       <div class="progress" aria-hidden="true"><div id="progress-bar"></div></div>
@@ -134,17 +148,6 @@
         </div>
       </form>
 
-      <footer id="weather" class="weather" hidden>
-        <span id="weather-icon" class="weather-icon" aria-hidden="true"></span>
-        <span id="weather-text" class="weather-text"></span>
-        <button id="weather-place" class="weather-place" type="button"
-                title="Usar a localização do aparelho">
-          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
-            <path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11z M12 12.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
-          </svg>
-          <span id="weather-place-name"></span>
-        </button>
-      </footer>
     </div>
   </div>
 

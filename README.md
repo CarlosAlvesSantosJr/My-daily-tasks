@@ -6,22 +6,31 @@ App web de tarefas com login, calendário, lista de mercado compartilhada em tem
 > **Em produção, num servidor próprio, e em uso no dia a dia.**
 > O app roda em um cluster Kubernetes hospedado no meu próprio computador, sem nuvem paga, e fica acessível pela internet por um túnel HTTPS da Cloudflare. É usado todos os dias, pelo celular, para organizar as tarefas e montar a lista de mercado compartilhada.
 
-<p align="center">
-  <img src="docs/screenshots/mercado-celular.jpg" alt="App no celular: aba Mercado com a lista compartilhada, o indicador Ao vivo e a previsão do tempo no rodapé" width="320">
-  <br>
-  <em>Uso real no celular: lista de mercado ao vivo e previsão do tempo no rodapé.</em>
-</p>
+<table align="center">
+  <tr>
+    <td align="center"><img src="docs/screenshots/lista-celular.jpg" alt="Aba Lista no celular: cabeçalho com saudação e previsão do tempo, tarefas em maiúsculas com datas e foto de fundo" width="240"></td>
+    <td align="center"><img src="docs/screenshots/mercado-celular.jpg" alt="Aba Mercado: lista compartilhada ao vivo, itens em maiúsculas com quem adicionou e itens comprados riscados" width="240"></td>
+    <td align="center"><img src="docs/screenshots/calendario-celular.jpg" alt="Aba Calendário: mês com marcadores nos dias com tarefas e as tarefas do dia escolhido" width="240"></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Lista</em></td>
+    <td align="center"><em>Mercado ao vivo</em></td>
+    <td align="center"><em>Calendário</em></td>
+  </tr>
+</table>
+
+<p align="center"><em>Prints do app em tela de celular (412 px), com dados de exemplo. A previsão do tempo é real, pela localização do aparelho.</em></p>
 
 ## Funcionalidades
 
 | Área | O que faz |
 |---|---|
-| **Lista** | Tarefas privadas por usuário: criar, editar, concluir, apagar, dar uma data e filtrar por todas, pendentes ou concluídas. |
+| **Lista** | Tarefas privadas por usuário: criar, editar, concluir, apagar, dar uma data e filtrar por todas, pendentes ou concluídas. O texto fica sempre em MAIÚSCULAS. |
 | **Calendário** | Visão do mês com marcadores nos dias que têm tarefas. Ao tocar num dia, aparecem as tarefas dele e dá para criar outras já com essa data. |
-| **Mercado** | Lista compartilhada entre os usuários e atualizada **em tempo real** via WebSocket. Quando alguém adiciona um item, os outros recebem uma **notificação push** no celular. |
-| **Previsão do tempo** | O rodapé mostra a temperatura atual, a máxima e a mínima do dia e a chance de chuva. A cidade vem pelo IP ou, se o usuário tocar no nome dela, pelo GPS. |
-| **PWA** | Instalável no Android e no iPhone, abre sem internet com o shell em cache e funciona em tela cheia. |
-| **Tema escuro** | Fixo em todos os aparelhos, para ser confortável para os olhos. |
+| **Mercado** | Lista compartilhada entre os usuários e atualizada **em tempo real** via WebSocket. Quando alguém adiciona um item, os outros recebem uma **notificação push** no celular. Os itens ficam sempre em MAIÚSCULAS. |
+| **Previsão do tempo** | O cabeçalho, ao lado da saudação, mostra a temperatura atual, a condição, a máxima e a mínima do dia, a chance de chuva e a cidade. O local vem da localização atual do aparelho; se ela falhar, da última localização que o aparelho informou; sem nenhuma, do IP. Atualiza a cada 30 minutos. |
+| **PWA** | Instalável no Android e no iPhone, abre sem internet com o shell em cache (inclusive a foto de fundo) e funciona em tela cheia. |
+| **Visual** | Tema escuro fixo em todos os aparelhos, com uma foto de fundo escurecida (mais no topo, para o cabeçalho continuar legível) e cartões semitransparentes. |
 
 ## Stack
 
@@ -119,6 +128,7 @@ classDiagram
     class store_js {
         +createTodoStore(dir)
         +createMarketStore(dir)
+        +toUpperText(texto) string
         +readJsonFile(arquivo, padrão)
         +writeJsonFile(arquivo, dados)
     }
@@ -207,16 +217,16 @@ sequenceDiagram
 
     Carlos->>A: digita "café" e toca em +
     A->>S: POST /api/market {text}
-    S->>S: valida a sessão (cookie) e o texto
+    S->>S: valida a sessão (cookie) e o texto, e converte para "CAFÉ"
     S->>D: grava market.json (tmp + rename)
     S-->>A: 201 com a lista nova
     S-)B: WebSocket: lista nova e evento
     B->>B: atualiza a tela ao vivo
     S-)P: Web Push para os aparelhos dos outros usuários
-    P-)Monica: notificação "Carlos adicionou café"
+    P-)Monica: notificação "Carlos adicionou CAFÉ"
 ```
 
-### Sequência: previsão do tempo no rodapé
+### Sequência: previsão do tempo no cabeçalho
 
 ```mermaid
 sequenceDiagram
@@ -227,15 +237,16 @@ sequenceDiagram
     participant O as Nominatim
     participant M as Open-Meteo
 
-    alt GPS autorizado no aparelho
+    alt localização atual ou última conhecida
         N->>N: navigator.geolocation
+        N->>N: guarda a posição (se falhar, usa a última guardada)
         N->>S: GET /api/weather?lat&lon
         S->>S: arredonda para ~1 km
         S->>C: nome da cidade em cache?
         C-->>S: não
         S->>O: reverse geocoding
         O-->>S: "Tubarão"
-    else sem GPS
+    else nenhuma localização
         N->>S: GET /api/weather
         S->>I: local pelo IP do visitante
         I-->>S: cidade e coordenadas
@@ -245,7 +256,7 @@ sequenceDiagram
     S->>M: forecast (atual + dia)
     M-->>S: temperatura, código WMO, máx/mín, chuva
     S-->>N: WeatherReport
-    N->>N: rodapé: ícone, 22°, 24°/16°, chuva 100%
+    N->>N: cabeçalho: ícone, 22°, 24°/16°, chuva 100%
 ```
 
 ## API
@@ -283,7 +294,7 @@ Todas as rotas `/api/*` exigem login, exceto `login` e `logout`. As respostas s�
 | [Nominatim / OpenStreetMap](https://nominatim.org) | Nome da cidade a partir das coordenadas do GPS | Não precisa |
 | Web Push (FCM, Apple, Mozilla, Windows) | Entrega das notificações; só esses serviços são aceitos | VAPID, gerada pelo app |
 
-As coordenadas são arredondadas para cerca de 1 km e as respostas ficam 15 minutos em cache na memória. Se uma API cair, só o rodapé some; o resto do app continua funcionando.
+As coordenadas são arredondadas para cerca de 1 km e as respostas ficam 15 minutos em cache na memória. Se uma API cair, só a previsão some; o resto do app continua funcionando.
 
 ## Segurança
 
@@ -293,14 +304,16 @@ As coordenadas são arredondadas para cerca de 1 km e as respostas ficam 15 minu
 - Cabeçalhos `Content-Security-Policy: default-src 'self'`, `X-Content-Type-Options` e `Referrer-Policy`. Os arquivos estáticos são servidos a partir de uma lista fixa, então nenhum caminho vindo da URL chega ao disco.
 - O WebSocket confere a origem e a sessão. As inscrições de push só aceitam serviços conhecidos, para impedir SSRF.
 - Toda operação usa o `userId` da sessão, nunca o enviado pelo cliente.
+- A foto de fundo (`/bg.jpg`) é pública, como os demais arquivos do PWA: aparece na tela de login e abre sem login para quem tiver o endereço.
+- A última posição do aparelho fica só no `localStorage` dele, arredondada para cerca de 10 m; o servidor arredonda de novo para cerca de 1 km antes de consultar as APIs.
 
 ## Testes realizados
 
-**48 testes automatizados, todos passando** (`npm test`, com `node:test`). Eles sobem o servidor de verdade numa porta aleatória, com dados num diretório temporário. O push e as APIs de clima são simulados, então os testes não dependem da internet.
+**49 testes automatizados, todos passando** (`npm test`, com `node:test`). Eles sobem o servidor de verdade numa porta aleatória, com dados num diretório temporário. O push e as APIs de clima são simulados, então os testes não dependem da internet.
 
 ```
-ℹ tests 48
-ℹ pass 48
+ℹ tests 49
+ℹ pass 49
 ℹ fail 0
 ```
 
@@ -308,9 +321,9 @@ As coordenadas são arredondadas para cerca de 1 km e as respostas ficam 15 minu
 |---|---|
 | **Login e sessão** | Recusa senha errada e usuário inexistente; a senha de um usuário não entra na conta do outro; aceita maiúsculas e acentos no nome; cookie `HttpOnly`, `SameSite=Strict` e `Secure` com HTTPS; logout invalida a sessão; sessões sobrevivem a reiniciar o servidor sem guardar o token |
 | **Limite de tentativas** | Muitas senhas erradas bloqueiam até a senha certa; atrás do túnel, o limite vale por visitante; trocar de IP não escapa do limite por conta; sem túnel, o cabeçalho de IP é ignorado |
-| **Tarefas** | Criar, editar, concluir e apagar; reagendar e tirar a data; concluir não apaga a data; texto e data inválidos são recusados |
+| **Tarefas** | Criar, editar, concluir e apagar; o texto é gravado em maiúsculas ao criar e ao editar; reagendar e tirar a data; concluir não apaga a data; texto e data inválidos são recusados |
 | **Privacidade** | Cada usuário vê só a própria lista; não altera nem apaga tarefa do outro pelo id; o cliente não escolhe de quem é a lista; apagar concluídas só afeta a própria lista |
-| **Mercado e tempo real** | Lista igual para todos; um usuário marca e apaga item do outro; item novo chega ao vivo; quem conecta depois recebe a lista atual; o WebSocket exige login e mesma origem; logout encerra a conexão |
+| **Mercado e tempo real** | Itens em maiúsculas, inclusive com acentos; lista igual para todos; um usuário marca e apaga item do outro; item novo chega ao vivo; quem conecta depois recebe a lista atual; o WebSocket exige login e mesma origem; logout encerra a conexão |
 | **Notificações** | Vão só para os outros usuários; marcar como comprado não notifica; o aparelho passa para quem entrou por último; o usuário só cancela a própria inscrição; inscrição cancelada pelo navegador é removida; falha no push não impede adicionar o item; só serviços de push conhecidos são aceitos; a chave VAPID persiste |
 | **Previsão do tempo** | Exige login; o GPS traz a cidade e arredonda as coordenadas; sem GPS usa o IP, e um IP interno cai no IP público; o cache evita chamadas repetidas; coordenadas inválidas são recusadas; API fora do ar vira 502 sem derrubar o app |
 | **Servidor** | Arquivos do PWA e `/healthz` são públicos; arquivos do servidor e dados nunca são servidos; a página inicial sai com os cabeçalhos de segurança |
@@ -319,7 +332,9 @@ As coordenadas são arredondadas para cerca de 1 km e as respostas ficam 15 minu
 
 - Depois de cada publicação, o endereço público foi testado: `/`, `/healthz`, `/manifest.webmanifest` e `/sw.js` responderam 200, e `/api/weather` respondeu 401 sem login.
 - O módulo de clima foi testado de dentro do pod, com as APIs reais, pelo IP e pelo GPS.
-- O app foi testado no celular Android (print acima): login, lista de mercado ao vivo e previsão do tempo no rodapé.
+- O app foi testado no celular Android: login e lista de mercado ao vivo.
+- Os prints do início foram gerados com o app rodando localmente, dados de exemplo e o Edge em modo headless emulando um celular, com a localização de Tubarão (SC) e as APIs de clima reais.
+- O cabeçalho com a previsão e a foto de fundo foi conferido renderizado nas larguras de celular de 360 px e 412 px.
 
 ## Estrutura do projeto
 
@@ -332,13 +347,14 @@ As coordenadas são arredondadas para cerca de 1 km e as respostas ficam 15 minu
 │   ├── push.js         # notificações Web Push (VAPID)
 │   └── weather.js      # previsão do tempo (Open-Meteo, ipwho.is, Nominatim)
 ├── public/
-│   ├── index.html      # interface (login, lista, calendário, mercado, rodapé)
+│   ├── index.html      # interface (login, lista, calendário, mercado, previsão)
 │   ├── app.js          # lógica do cliente
-│   ├── style.css       # tema escuro e layout responsivo
+│   ├── style.css       # tema escuro, foto de fundo e layout responsivo
 │   ├── sw.js           # service worker: cache do shell e push
 │   ├── manifest.webmanifest
+│   ├── bg.jpg          # foto de fundo
 │   └── icons/
-├── test/app.test.js    # 48 testes de integração
+├── test/app.test.js    # 49 testes de integração
 ├── k8s/                # namespace, PVC, Deployments, Service e túnel
 ├── scripts/
 │   ├── deploy.ps1      # build da imagem e publicação no Kubernetes
@@ -355,12 +371,15 @@ Precisa do Docker Desktop com o Kubernetes ligado. Na pasta do projeto, em Power
 .\scripts\deploy.ps1
 ```
 
-O script roda quatro etapas:
+O script roda cinco etapas:
 
 1. Constrói a imagem com uma tag nova (`to-do-list:<versão>-<data-hora>`).
 2. Cria ou atualiza o Secret com as senhas.
 3. Aplica os manifests.
 4. Espera o rollout e mostra o endereço público.
+5. Apaga as imagens antigas do app, guardando só a atual e a anterior.
+
+Para voltar à versão anterior: `kubectl -n todo-list rollout undo deployment/todo`.
 
 Use o mesmo comando para publicar atualizações. Publicar de novo não troca o endereço.
 
@@ -393,7 +412,7 @@ Quando o endereço muda, o app instalado no celular para de funcionar. É precis
 
 Depois, na aba Mercado, toque em **Ativar avisos**. Cada usuário precisa fazer isso no próprio aparelho. A primeira ativação pode levar cerca de 30 segundos.
 
-Para a previsão usar a localização exata, toque no nome da cidade no rodapé e permita o acesso à localização.
+A previsão pede acesso à localização ao abrir o app; permita para ela seguir o aparelho. Tocar no nome da cidade atualiza na hora.
 
 ## Usuários e senhas
 

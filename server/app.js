@@ -13,7 +13,7 @@ const {
   createLoginLimiter,
 } = require('./auth');
 const { createPush } = require('./push');
-const { createMarketStore, createTodoStore } = require('./store');
+const { createMarketStore, createTodoStore, toUpperText } = require('./store');
 const { createWeather } = require('./weather');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -32,6 +32,7 @@ const STATIC_FILES = {
   '/sw.js': ['sw.js', 'text/javascript; charset=utf-8'],
   '/manifest.webmanifest': ['manifest.webmanifest', 'application/manifest+json'],
   '/icon.svg': ['icon.svg', 'image/svg+xml'],
+  '/bg.jpg': ['bg.jpg', 'image/jpeg'],
   '/icons/icon-192.png': ['icons/icon-192.png', 'image/png'],
   '/icons/icon-512.png': ['icons/icon-512.png', 'image/png'],
   '/icons/maskable-512.png': ['icons/maskable-512.png', 'image/png'],
@@ -232,7 +233,7 @@ function createApp({ users, dataDir, trustProxy = false, pushOptions, weatherOpt
 
   async function addMarketItem(req, res, user) {
     const { text: rawText } = await readJson(req);
-    const text = parseText(rawText, 'Escreva o item.');
+    const text = toUpperText(parseText(rawText, 'Escreva o item.'));
     sendMarket(res, 201, market.add(text, user.name), { by: user.name, text });
     await push.notifyOthers(user.id, {
       title: 'Lista de mercado',

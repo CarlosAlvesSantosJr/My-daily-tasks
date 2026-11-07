@@ -30,6 +30,13 @@ Invoke-Checked { $manifest | kubectl apply -f - }
 Invoke-Checked { kubectl -n todo-list rollout status deployment/todo --timeout=120s }
 Invoke-Checked { kubectl -n todo-list rollout status deployment/cloudflared --timeout=120s }
 
+# Cada publicação gera uma imagem; guarda só a atual e a anterior (a mesma que o
+# Kubernetes guarda para o rollout undo).
+docker images to-do-list --format '{{.CreatedAt}}|{{.Tag}}' |
+  Sort-Object -Descending |
+  Select-Object -Skip 2 |
+  ForEach-Object { docker rmi "to-do-list:$($_.Split('|')[1])" | Out-Null }
+
 $url = kubectl -n todo-list logs deployment/cloudflared |
   Select-String -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' |
   Select-Object -Last 1

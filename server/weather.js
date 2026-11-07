@@ -12,7 +12,6 @@ const MAX_CACHE_ENTRIES = 500;
 const TIMEOUT_MS = 8000;
 const USER_AGENT = 'MinhasTarefas/2.0 (app pessoal de tarefas)';
 
-class WeatherError extends Error {}
 
 /** Duas casas decimais (~1 km): basta para o clima e não guarda o endereço exato. */
 const round = (value) => Math.round(value * 100) / 100;
@@ -37,10 +36,10 @@ function createWeather({ fetch: fetchImpl = fetch } = {}) {
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
     } catch (err) {
-      throw new WeatherError(`Falha ao consultar ${new URL(url).host}: ${err.message}`);
+      throw new Error(`Falha ao consultar ${new URL(url).host}: ${err.message}`);
     }
     if (!response.ok) {
-      throw new WeatherError(`${new URL(url).host} respondeu ${response.status}`);
+      throw new Error(`${new URL(url).host} respondeu ${response.status}`);
     }
     return response.json();
   }
@@ -50,7 +49,7 @@ function createWeather({ fetch: fetchImpl = fetch } = {}) {
     const fields = 'fields=success,city,latitude,longitude';
     let found = ip ? await getJson(`https://ipwho.is/${encodeURIComponent(ip)}?${fields}`) : null;
     if (!found || !found.success) found = await getJson(`https://ipwho.is/?${fields}`);
-    if (!found.success) throw new WeatherError('Local não encontrado pelo IP.');
+    if (!found.success) throw new Error('Local não encontrado pelo IP.');
     return { lat: round(found.latitude), lon: round(found.longitude), place: found.city || null };
   }
 
@@ -78,7 +77,7 @@ function createWeather({ fetch: fetchImpl = fetch } = {}) {
     });
     const data = await getJson(`https://api.open-meteo.com/v1/forecast?${params}`);
     const { current, daily } = data;
-    if (!current || !daily) throw new WeatherError('Resposta da previsão incompleta.');
+    if (!current || !daily) throw new Error('Resposta da previsão incompleta.');
     return {
       temperature: Math.round(current.temperature_2m),
       weatherCode: current.weather_code,
@@ -111,4 +110,4 @@ function createWeather({ fetch: fetchImpl = fetch } = {}) {
   };
 }
 
-module.exports = { createWeather, WeatherError };
+module.exports = { createWeather };

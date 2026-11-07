@@ -2,7 +2,7 @@
   /* Sempre escuro, em qualquer aparelho: mais confortável para os olhos. */
   color-scheme: dark;
   --bg: #191a17;
-  --surface: #24261f;
+  --surface: rgba(36, 38, 31, .82);
   --ink: #eeeadf;
   --muted: #a3a698;
   --line: #383b31;
@@ -24,6 +24,19 @@ body {
   background: var(--bg);
   color: var(--ink);
   font: 16px/1.45 var(--body);
+}
+
+/* Foto de fundo numa camada fixa (background-attachment: fixed falha no iOS),
+   escurecida para o texto continuar legível. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    /* Mais escuro no topo, onde o céu claro da foto apagava o cabeçalho. */
+    linear-gradient(rgba(25, 26, 23, .82), rgba(25, 26, 23, .5) 40%, rgba(25, 26, 23, .8)),
+    url("/bg.jpg") center 30% / cover no-repeat;
 }
 
 h1 {
@@ -97,7 +110,53 @@ input:not([type="checkbox"]) {
 }
 
 .top { padding: max(20px, env(safe-area-inset-top)) 16px 8px; }
-.top-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.top-row { display: flex; align-items: flex-start; gap: 12px; }
+.top-row > div:first-child { flex: 1; min-width: 0; }
+
+/* Previsão do tempo no cabeçalho, entre a saudação e o botão Sair. */
+.weather {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  align-items: flex-end;
+  color: var(--muted);
+  font-size: .8rem;
+  line-height: 1.25;
+  text-align: right;
+}
+
+.weather p { margin: 0; }
+.weather-now { display: flex; align-items: center; gap: 6px; color: var(--ink); }
+.weather-icon { font-size: 1.6rem; line-height: 1; }
+.weather-temp { font: 500 1.75rem/1 var(--display); }
+.weather .weather-text { margin-top: 4px; white-space: nowrap; }
+.weather-rain { display: block; }
+
+.weather-place {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+  min-height: 28px;
+  margin-right: -6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  color: inherit;
+  font: inherit;
+}
+
+.weather-place svg { flex: none; }
+.weather-place.precise { color: var(--accent); }
+
+#weather-place-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 379px) {
+  .weather-label { display: none; }
+}
 .date { margin: 0 0 2px; font-size: .9rem; }
 .date::first-letter { text-transform: uppercase; }
 
@@ -148,7 +207,7 @@ input:not([type="checkbox"]) {
   padding: 0 5px;
   border-radius: 10px;
   background: var(--danger);
-  color: var(--surface);
+  color: #24261f;
   font-size: .75rem;
   line-height: 20px;
 }
@@ -266,55 +325,16 @@ input:not([type="checkbox"]) {
   position: sticky;
   bottom: 0;
   padding-bottom: env(safe-area-inset-bottom);
-  background: var(--bg);
+  background: rgba(25, 26, 23, .85);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
   border-top: 1px solid var(--line);
 }
 
 .composer { padding: 10px 16px; }
-
-/* Previsão do tempo, uma linha discreta abaixo do campo de nova tarefa. */
-.weather {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 32px;
-  padding: 0 16px 8px;
-  color: var(--muted);
-  font-size: .85rem;
-  line-height: 1.2;
-}
-
-.weather-icon { font-size: 1.05rem; }
-.weather-text { white-space: nowrap; }
-
-.weather-place {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  min-width: 0;
-  min-height: 32px;
-  margin-left: auto;
-  padding: 0 6px;
-  border: 0;
-  border-radius: 8px;
-  background: none;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-}
-
-.weather-place svg { flex: none; }
-.weather-place.precise { color: var(--accent); }
-
-#weather-place-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-@media (max-width: 379px) {
-  .weather-label { display: none; }
-}
+/* Tarefas e itens ficam em maiúsculas; o servidor também converte. */
+#new-todo, .edit-input { text-transform: uppercase; }
+#new-todo::placeholder { text-transform: none; }
 
 .composer-row { display: flex; gap: 8px; }
 

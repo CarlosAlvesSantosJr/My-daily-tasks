@@ -4,6 +4,9 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
+/** Tarefas e itens de mercado ficam sempre em maiúsculas. */
+const toUpperText = (text) => text.toLocaleUpperCase('pt-BR');
+
 /** Devolve o JSON do arquivo, ou `fallback` se ele ainda não existe. */
 function readJsonFile(file, fallback) {
   try {
@@ -32,7 +35,9 @@ function createTodoStore(dir) {
   fs.mkdirSync(dir, { recursive: true });
 
   const fileFor = (userId) => path.join(dir, `todos-${userId}.json`);
-  const read = (userId) => readJsonFile(fileFor(userId), []);
+  // As gravadas antes da regra das maiúsculas são convertidas na leitura.
+  const read = (userId) => readJsonFile(fileFor(userId), [])
+    .map((todo) => ({ ...todo, text: toUpperText(todo.text) }));
   const write = (userId, todos) => writeJsonFile(fileFor(userId), todos);
 
   return {
@@ -42,7 +47,7 @@ function createTodoStore(dir) {
       const todos = read(userId);
       const todo = {
         id: crypto.randomUUID(),
-        text,
+        text: toUpperText(text),
         done: false,
         dueDate,
         createdAt: new Date().toISOString(),
@@ -57,6 +62,7 @@ function createTodoStore(dir) {
       const todo = todos.find((item) => item.id === id);
       if (!todo) return null;
       Object.assign(todo, changes);
+      todo.text = toUpperText(todo.text);
       write(userId, todos);
       return todo;
     },
@@ -86,7 +92,12 @@ function createMarketStore(dir) {
   fs.mkdirSync(dir, { recursive: true });
 
   const file = path.join(dir, 'market.json');
-  const read = () => readJsonFile(file, { version: 0, items: [] });
+  // Os itens gravados antes da regra das maiúsculas são convertidos na leitura.
+  const read = () => {
+    const state = readJsonFile(file, { version: 0, items: [] });
+    for (const item of state.items) item.text = toUpperText(item.text);
+    return state;
+  };
 
   function save(items, version) {
     const state = { version: version + 1, items };
@@ -101,7 +112,7 @@ function createMarketStore(dir) {
       const { version, items } = read();
       const item = {
         id: crypto.randomUUID(),
-        text,
+        text: toUpperText(text),
         bought: false,
         addedBy,
         createdAt: new Date().toISOString(),
@@ -134,6 +145,7 @@ function createMarketStore(dir) {
 module.exports = {
   createTodoStore,
   createMarketStore,
+  toUpperText,
   readJsonFile,
   writeJsonFile,
 };
