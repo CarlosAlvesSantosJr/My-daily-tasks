@@ -1,6 +1,6 @@
 {
   "name": "to-do-list",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "description": "Lista de tarefas web com login, uma lista privada por usuário",
   "main": "server/index.js",

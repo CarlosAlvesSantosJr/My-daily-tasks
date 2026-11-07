@@ -121,6 +121,7 @@ function showLogin() {
   $('add-form').reset();
   $('login-form').reset();
   $('login-error').hidden = true;
+  stopWeather();
   $('app-view').hidden = true;
   $('login-view').hidden = false;
   $('username').focus();
@@ -140,6 +141,7 @@ async function showApp(name) {
   render();
   connectLive();
   syncPush();
+  startWeather();
 }
 
 /** Pendentes primeiro; dentro delas, as datas mais próximas e depois as sem data. */
@@ -714,6 +716,151 @@ $('enable-push').addEventListener('click', async () => {
   await attempt(enablePush);
   button.disabled = false;
   button.textContent = label;
+});
+
+/* Previsão do tempo no rodapé */
+
+const WEATHER_REFRESH_MS = 30 * 60 * 1000;
+const PRECISE_KEY = 'weather-precise'; // o usuário já autorizou o GPS
+
+// Códigos WMO usados pela Open-Meteo: [códigos, ícone de dia, de noite, descrição].
+const WEATHER_CODES = [
+  [[0], '☀️', '🌙', 'Céu limpo'],
+  [[1], '🌤️', '🌙', 'Poucas nuvens'],
+  [[2], '⛅', '☁️', 'Parcialmente nublado'],
+  [[3], '☁️', '☁️', 'Nublado'],
+  [[45, 48], '🌫️', '🌫️', 'Neblina'],
+  [[51, 53, 55, 56, 57], '🌦️', '🌧️', 'Garoa'],
+  [[61, 63, 66], '🌧️', '🌧️', 'Chuva'],
+  [[65, 67], '🌧️', '🌧️', 'Chuva forte'],
+  [[71, 73, 75, 77, 85, 86], '❄️', '❄️', 'Neve'],
+  [[80, 81, 82], '🌦️', '🌧️', 'Pancadas de chuva'],
+  [[95, 96, 99], '⛈️', '⛈️', 'Trovoadas'],
+];
+
+function describeWeather(code, isDay) {
+  const entry = WEATHER_CODES.find(([codes]) => codes.includes(code));
+  if (!entry) return { icon: '🌡️', label: '' };
+  return { icon: isDay ? entry[1] : entry[2], label: entry[3] };
+}
+
+function readPrecise() {
+  try {
+    return localStorage.getItem(PRECISE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function savePrecise(precise) {
+  try {
+    if (precise) localStorage.setItem(PRECISE_KEY, '1');
+    else localStorage.removeItem(PRECISE_KEY);
+  } catch {
+    // Sem armazenamento, só pergunta de novo da próxima vez.
+  }
+}
+
+function currentPosition() {
+  return new Promise((resolve, reject) => {
+    if (!('geolocation' in navigator)) {
+      reject(new Error('Este aparelho não informa a localização.'));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => resolve(coords),
+      (err) => reject(new Error(err.code === err.PERMISSION_DENIED
+        ? 'Permissão de localização negada.'
+        : 'Não foi possível obter a localização.')),
+      { timeout: 10000, maximumAge: WEATHER_REFRESH_MS },
+    );
+  });
+}
+
+let weatherTimer;
+let weatherLoadedAt = 0;
+
+/**
+ * Sem GPS autorizado, usa o local aproximado pelo IP, sem pedir permissão.
+ * Tocar no nome da cidade pede o GPS e lembra a escolha neste aparelho.
+ */
+async function loadWeather({ askLocation = false } = {}) {
+  let precise = askLocation || readPrecise();
+  let path = '/api/weather';
+  if (precise) {
+    try {
+      const { latitude, longitude } = await currentPosition();
+      path += `?lat=${latitude.toFixed(4)}&lon=${longitude.toFixed(4)}`;
+    } catch (err) {
+      precise = false;
+      savePrecise(false);
+      if (askLocation) showToast(`${err.message} Usando o local aproximado.`);
+    }
+  }
+
+  let report;
+  try {
+    report = await api(path);
+  } catch (err) {
+    if (askLocation && !err.silent) showToast(err.message);
+    return;
+  }
+  if (!state.userName) return; // saiu enquanto carregava
+
+  savePrecise(precise);
+  weatherLoadedAt = Date.now();
+  renderWeather(report, precise);
+}
+
+function renderWeather({ place, temperature, weatherCode, isDay, max, min, rainChance }, precise) {
+  const { icon, label } = describeWeather(weatherCode, isDay);
+  const rain = rainChance === null ? '' : ` · chuva ${rainChance}%`;
+  const placeName = place || 'Seu local';
+
+  $('weather-icon').textContent = icon;
+  const text = $('weather-text');
+  const now = document.createElement('strong');
+  now.textContent = `${temperature}°`;
+  const detail = document.createElement('span');
+  detail.className = 'weather-label';
+  detail.textContent = label ? ` ${label}` : '';
+  text.replaceChildren(now, detail, ` · ${max}°/${min}°${rain}`);
+
+  $('weather-place-name').textContent = placeName;
+  const button = $('weather-place');
+  button.classList.toggle('precise', precise);
+  button.title = precise ? 'Atualizar pela localização do aparelho' : 'Usar a localização do aparelho';
+  $('weather').title = `${placeName}: ${temperature}°, ${label || 'agora'}. `
+    + `Máxima ${max}°, mínima ${min}°${rain.replace(' · c', '. C')}.`;
+  $('weather').hidden = false;
+}
+
+function startWeather() {
+  loadWeather();
+  clearInterval(weatherTimer);
+  weatherTimer = setInterval(() => {
+    if (!document.hidden) loadWeather();
+  }, WEATHER_REFRESH_MS);
+}
+
+function stopWeather() {
+  clearInterval(weatherTimer);
+  weatherLoadedAt = 0;
+  $('weather').hidden = true;
+}
+
+// Ao voltar para o app depois de muito tempo, a previsão pode estar velha.
+document.addEventListener('visibilitychange', () => {
+  if (state.userName && !document.hidden && Date.now() - weatherLoadedAt > WEATHER_REFRESH_MS) {
+    loadWeather();
+  }
+});
+
+$('weather-place').addEventListener('click', async () => {
+  const button = $('weather-place');
+  button.disabled = true;
+  await loadWeather({ askLocation: true });
+  button.disabled = false;
 });
 
 let installPrompt = null;

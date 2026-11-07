@@ -1,30 +1,17 @@
 :root {
-  color-scheme: light dark;
-  --bg: #f6f1e7;
-  --surface: #fffdf8;
-  --ink: #23261f;
-  --muted: #676b5f;
-  --line: #e2dbcb;
-  --accent: #2f6b4f;
-  --accent-ink: #fffdf8;
-  --danger: #b03a2e;
-  --shadow: 0 1px 2px rgb(60 50 30 / 8%);
+  /* Sempre escuro, em qualquer aparelho: mais confortável para os olhos. */
+  color-scheme: dark;
+  --bg: #191a17;
+  --surface: #24261f;
+  --ink: #eeeadf;
+  --muted: #a3a698;
+  --line: #383b31;
+  --accent: #7cc4a0;
+  --accent-ink: #14211a;
+  --danger: #f0897c;
+  --shadow: none;
   --display: Georgia, "Iowan Old Style", "Times New Roman", serif;
   --body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #191a17;
-    --surface: #24261f;
-    --ink: #eeeadf;
-    --muted: #a3a698;
-    --line: #383b31;
-    --accent: #7cc4a0;
-    --accent-ink: #14211a;
-    --danger: #f0897c;
-    --shadow: none;
-  }
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -275,12 +262,58 @@ input:not([type="checkbox"]) {
 }
 
 /* Fica no rodapé, ao alcance do polegar no celular. */
-.composer {
+.dock {
   position: sticky;
   bottom: 0;
-  padding: 10px 16px max(10px, env(safe-area-inset-bottom));
+  padding-bottom: env(safe-area-inset-bottom);
   background: var(--bg);
   border-top: 1px solid var(--line);
+}
+
+.composer { padding: 10px 16px; }
+
+/* Previsão do tempo, uma linha discreta abaixo do campo de nova tarefa. */
+.weather {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 16px 8px;
+  color: var(--muted);
+  font-size: .85rem;
+  line-height: 1.2;
+}
+
+.weather-icon { font-size: 1.05rem; }
+.weather-text { white-space: nowrap; }
+
+.weather-place {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  min-height: 32px;
+  margin-left: auto;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.weather-place svg { flex: none; }
+.weather-place.precise { color: var(--accent); }
+
+#weather-place-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 379px) {
+  .weather-label { display: none; }
 }
 
 .composer-row { display: flex; gap: 8px; }
@@ -455,7 +488,7 @@ input:not([type="checkbox"]) {
   position: fixed;
   left: 16px;
   right: 16px;
-  bottom: calc(84px + env(safe-area-inset-bottom));
+  bottom: calc(120px + env(safe-area-inset-bottom));
   max-width: 420px;
   margin: 0 auto;
   padding: 12px 16px;
@@ -467,7 +500,7 @@ input:not([type="checkbox"]) {
 }
 
 @media (hover: hover) {
-  .icon:hover, .ghost:hover { background: var(--line); }
+  .icon:hover, .ghost:hover, .weather-place:hover { background: var(--line); }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -14,6 +14,7 @@ const {
 } = require('./auth');
 const { createPush } = require('./push');
 const { createMarketStore, createTodoStore } = require('./store');
+const { createWeather } = require('./weather');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const MAX_BODY_BYTES = 10 * 1024;
@@ -133,7 +134,7 @@ function isSameOrigin(req) {
  * `trustProxy` só pode ser ligado quando o app é acessível apenas pelo túnel
  * da Cloudflare; fora disso, qualquer um poderia forjar este cabeçalho.
  */
-function createApp({ users, dataDir, trustProxy = false, pushOptions }) {
+function createApp({ users, dataDir, trustProxy = false, pushOptions, weatherOptions }) {
   const usersById = new Map(users.map((user) => [user.id, user]));
   const sessions = createSessions(path.join(dataDir, 'sessions.json'));
   const limiter = createLoginLimiter();
@@ -142,6 +143,7 @@ function createApp({ users, dataDir, trustProxy = false, pushOptions }) {
   const todos = createTodoStore(dataDir);
   const market = createMarketStore(dataDir);
   const push = createPush(dataDir, pushOptions);
+  const weather = createWeather(weatherOptions);
   const live = new WebSocketServer({ noServer: true, maxPayload: 1024 });
   // Usuário inexistente gasta o mesmo tempo que senha errada.
   const decoy = users[0];
@@ -259,7 +261,31 @@ function createApp({ users, dataDir, trustProxy = false, pushOptions }) {
     sendJson(res, 204);
   }
 
-  async function handleApi(req, res, pathname) {
+  /** Com `lat` e `lon` usa o GPS do aparelho; sem eles, o local aproximado pelo IP. */
+  async function sendWeather(req, res, searchParams) {
+    const hasLat = searchParams.has('lat');
+    if (hasLat !== searchParams.has('lon')) throw new HttpError(400, 'Informe latitude e longitude.');
+    let report;
+    try {
+      if (hasLat) {
+        const lat = Number.parseFloat(searchParams.get('lat'));
+        const lon = Number.parseFloat(searchParams.get('lon'));
+        if (!(Math.abs(lat) <= 90 && Math.abs(lon) <= 180)) {
+          throw new HttpError(400, 'Coordenadas inválidas.');
+        }
+        report = await weather.forCoordinates(lat, lon);
+      } else {
+        report = await weather.forIp(clientIp(req).replace(/^::ffff:/, ''));
+      }
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      console.warn('Previsão do tempo:', err.message);
+      throw new HttpError(502, 'Previsão do tempo indisponível agora.');
+    }
+    sendJson(res, 200, report);
+  }
+
+  async function handleApi(req, res, pathname, searchParams) {
     const route = `${req.method} ${pathname}`;
 
     if (route === 'POST /api/login') return login(req, res);
@@ -268,6 +294,7 @@ function createApp({ users, dataDir, trustProxy = false, pushOptions }) {
     const user = requireUser(req);
 
     if (route === 'GET /api/me') return sendJson(res, 200, { name: user.name });
+    if (route === 'GET /api/weather') return sendWeather(req, res, searchParams);
 
     if (route === 'GET /api/todos') return sendJson(res, 200, todos.list(user.id));
     if (route === 'POST /api/todos') {
@@ -328,9 +355,9 @@ function createApp({ users, dataDir, trustProxy = false, pushOptions }) {
       res.setHeader(name, value);
     }
     try {
-      const { pathname } = new URL(req.url, 'http://localhost');
+      const { pathname, searchParams } = new URL(req.url, 'http://localhost');
       if (pathname === '/healthz') sendJson(res, 200, { ok: true });
-      else if (pathname.startsWith('/api/')) await handleApi(req, res, pathname);
+      else if (pathname.startsWith('/api/')) await handleApi(req, res, pathname, searchParams);
       else serveStatic(req, res, pathname);
     } catch (err) {
       if (err instanceof HttpError) {

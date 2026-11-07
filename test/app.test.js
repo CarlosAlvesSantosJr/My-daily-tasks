@@ -16,6 +16,31 @@ let baseUrl;
 let dataDir;
 const pushed = [];
 let pushError = null;
+const weatherCalls = [];
+let weatherDown = false;
+
+/** Responde como as APIs públicas de clima, sem sair para a internet. */
+async function fakeWeatherFetch(url) {
+  weatherCalls.push(url);
+  const json = (body) => ({ ok: true, status: 200, json: async () => body });
+  if (weatherDown) return { ok: false, status: 503, json: async () => ({}) };
+  const { host } = new URL(url);
+  if (host === 'ipwho.is') {
+    if (url.includes('127.0.0.1')) return json({ success: false, message: 'Reserved range' });
+    return json({ success: true, city: 'Tubarão', latitude: -28.4667, longitude: -49.0069 });
+  }
+  if (host === 'nominatim.openstreetmap.org') {
+    return json({ name: 'Florianópolis', address: { city: 'Florianópolis' } });
+  }
+  return json({
+    current: { temperature_2m: 28.6, weather_code: 2, is_day: 1 },
+    daily: {
+      temperature_2m_max: [30.2],
+      temperature_2m_min: [18.7],
+      precipitation_probability_max: [60],
+    },
+  });
+}
 
 before(async () => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'todo-test-'));
@@ -31,7 +56,7 @@ before(async () => {
       pushed.push({ endpoint: subscription.endpoint, message: JSON.parse(payload) });
     },
   };
-  server = createApp({ users, dataDir, pushOptions });
+  server = createApp({ users, dataDir, pushOptions, weatherOptions: { fetch: fakeWeatherFetch } });
   await new Promise((resolve) => { server.listen(0, '127.0.0.1', resolve); });
   baseUrl = `http://127.0.0.1:${server.address().port}`;
 });
@@ -48,6 +73,8 @@ beforeEach(() => {
   }
   pushed.length = 0;
   pushError = null;
+  weatherCalls.length = 0;
+  weatherDown = false;
 });
 
 function request(method, url, { cookie, body } = {}) {
@@ -676,4 +703,62 @@ test('página inicial é servida com cabeçalhos de segurança', async () => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get('content-security-policy'), /default-src 'self'/);
   assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+});
+
+test('previsão do tempo exige login', async () => {
+  assert.equal((await request('GET', '/api/weather')).status, 401);
+  assert.equal(weatherCalls.length, 0);
+});
+
+test('previsão pelo GPS traz a cidade e arredonda as coordenadas', async () => {
+  const cookie = await login('ana', 'senha-ana');
+  const response = await request('GET', '/api/weather?lat=-27.59491&lon=-48.54822', { cookie });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    place: 'Florianópolis',
+    temperature: 29,
+    weatherCode: 2,
+    isDay: true,
+    max: 30,
+    min: 19,
+    rainChance: 60,
+  });
+  const forecast = weatherCalls.find((url) => url.includes('api.open-meteo.com'));
+  assert.match(forecast, /latitude=-27\.59&longitude=-48\.55/);
+});
+
+test('sem GPS, usa o local pelo IP; IP interno cai no IP público do servidor', async () => {
+  const cookie = await login('ana', 'senha-ana');
+  const response = await request('GET', '/api/weather', { cookie });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).place, 'Tubarão');
+  const lookups = weatherCalls.filter((url) => url.includes('ipwho.is'));
+  assert.equal(lookups.length, 2);
+  assert.ok(lookups[1].startsWith('https://ipwho.is/?'));
+});
+
+test('previsão fica em cache por um tempo', async () => {
+  const cookie = await login('ana', 'senha-ana');
+  await request('GET', '/api/weather?lat=10.001&lon=20.001', { cookie });
+  const calls = weatherCalls.length;
+  const again = await request('GET', '/api/weather?lat=10.002&lon=20.002', { cookie });
+  assert.equal(again.status, 200);
+  assert.equal(weatherCalls.length, calls);
+});
+
+test('coordenadas inválidas são recusadas', async () => {
+  const cookie = await login('ana', 'senha-ana');
+  for (const query of ['?lat=91&lon=0', '?lat=0&lon=181', '?lat=abc&lon=1', '?lat=1', '?lat=&lon=']) {
+    assert.equal((await request('GET', `/api/weather${query}`, { cookie })).status, 400, query);
+  }
+  assert.equal(weatherCalls.length, 0);
+});
+
+test('API de clima fora do ar vira erro 502 sem derrubar o app', async () => {
+  const cookie = await login('ana', 'senha-ana');
+  weatherDown = true;
+  const response = await request('GET', '/api/weather?lat=1.5&lon=2.5', { cookie });
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error, 'Previsão do tempo indisponível agora.');
+  assert.equal((await request('GET', '/api/todos', { cookie })).status, 200);
 });

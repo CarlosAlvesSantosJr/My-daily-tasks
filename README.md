@@ -1,9 +1,351 @@
 # Minhas Tarefas
 
-App web e PWA, responsivo para celular, com login:
+App web de tarefas com login, calendário, lista de mercado compartilhada em tempo real e previsão do tempo. É um PWA: pode ser instalado no celular como um app e recebe notificações mesmo fechado.
 
-- **Lista e Calendário:** tarefas privadas, cada usuário vê só as próprias.
-- **Mercado:** lista compartilhada entre os usuários, atualizada em tempo real, com notificação no celular mesmo com o app fechado.
+> [!IMPORTANT]
+> **Em produção, num servidor próprio, e em uso no dia a dia.**
+> O app roda em um cluster Kubernetes hospedado no meu próprio computador, sem nuvem paga, e fica acessível pela internet por um túnel HTTPS da Cloudflare. É usado todos os dias, pelo celular, para organizar as tarefas e montar a lista de mercado compartilhada.
+
+<p align="center">
+  <img src="docs/screenshots/mercado-celular.jpg" alt="App no celular: aba Mercado com a lista compartilhada, o indicador Ao vivo e a previsão do tempo no rodapé" width="320">
+  <br>
+  <em>Uso real no celular: lista de mercado ao vivo e previsão do tempo no rodapé.</em>
+</p>
+
+## Funcionalidades
+
+| Área | O que faz |
+|---|---|
+| **Lista** | Tarefas privadas por usuário: criar, editar, concluir, apagar, dar uma data e filtrar por todas, pendentes ou concluídas. |
+| **Calendário** | Visão do mês com marcadores nos dias que têm tarefas. Ao tocar num dia, aparecem as tarefas dele e dá para criar outras já com essa data. |
+| **Mercado** | Lista compartilhada entre os usuários e atualizada **em tempo real** via WebSocket. Quando alguém adiciona um item, os outros recebem uma **notificação push** no celular. |
+| **Previsão do tempo** | O rodapé mostra a temperatura atual, a máxima e a mínima do dia e a chance de chuva. A cidade vem pelo IP ou, se o usuário tocar no nome dela, pelo GPS. |
+| **PWA** | Instalável no Android e no iPhone, abre sem internet com o shell em cache e funciona em tela cheia. |
+| **Tema escuro** | Fixo em todos os aparelhos, para ser confortável para os olhos. |
+
+## Stack
+
+| Camada | Tecnologia |
+|---|---|
+| Linguagem | **JavaScript** (Node.js no servidor e JavaScript puro no navegador) |
+| Servidor | **Node.js 24**, só com o módulo `http` nativo, sem framework |
+| Tempo real | **WebSocket** ([`ws`](https://github.com/websockets/ws)) |
+| Notificações | **Web Push** com VAPID ([`web-push`](https://github.com/web-push-libs/web-push)) |
+| Frontend | HTML, CSS e JavaScript puros, sem framework e sem etapa de build |
+| PWA | Web App Manifest e Service Worker |
+| Dados | Arquivos JSON num volume persistente, com escrita atômica (arquivo temporário seguido de `rename`) |
+| Autenticação | Senhas com **scrypt**, sessão em cookie `HttpOnly` / `SameSite=Strict` e limite de tentativas de login |
+| Testes | **`node:test`**, o executor de testes nativo do Node |
+| Contêiner | **Docker** (`node:24-alpine`), rodando como usuário sem privilégios |
+| Orquestração | **Kubernetes** (Docker Desktop) |
+| Exposição pública | **Cloudflare Tunnel** (`cloudflared`), com HTTPS e sem abrir portas no roteador |
+
+São só duas dependências de produção: `ws` e `web-push`.
+
+## Arquitetura
+
+O navegador fala só com o servidor do app, pela mesma origem. As APIs externas são chamadas pelo servidor. Por isso a política de segurança da página continua fechada em `'self'` e o IP de quem usa o app não é enviado do navegador para terceiros.
+
+```mermaid
+flowchart LR
+    subgraph Aparelhos["Aparelhos dos usuários"]
+        PWA["PWA no navegador<br/>HTML · CSS · JS<br/>Service Worker"]
+    end
+
+    subgraph CF["Cloudflare"]
+        Edge["Borda HTTPS<br/>*.trycloudflare.com"]
+    end
+
+    subgraph PC["Servidor próprio · Docker Desktop · Kubernetes"]
+        subgraph NS["namespace todo-list"]
+            Tunnel["Pod cloudflared<br/>túnel de saída"]
+            Svc["Service todo<br/>ClusterIP :80"]
+            App["Pod todo<br/>Node.js :3000"]
+            PVC[("Volume todo-dados<br/>/data · JSON")]
+            Secret[["Secret todo-usuarios<br/>hashes das senhas"]]
+        end
+    end
+
+    subgraph APIs["APIs públicas"]
+        Meteo["Open-Meteo<br/>previsão"]
+        IPWho["ipwho.is<br/>local pelo IP"]
+        OSM["Nominatim / OSM<br/>nome da cidade"]
+        PushSvc["Serviços de push<br/>FCM · Apple · Mozilla"]
+    end
+
+    PWA -- "HTTPS + WebSocket" --> Edge
+    Edge <-- "túnel" --> Tunnel
+    Tunnel --> Svc --> App
+    App --- PVC
+    App --- Secret
+    App -- "HTTPS" --> Meteo & IPWho & OSM
+    App -- "Web Push" --> PushSvc
+    PushSvc -. "notificação" .-> PWA
+```
+
+**Decisões de projeto**
+
+- **Uma réplica só, com estratégia `Recreate`.** Os dados ficam em arquivos e as conexões em tempo real ficam em memória. A versão antiga para antes de a nova abrir o volume.
+- **Nenhuma porta aberta para a internet.** O `cloudflared` abre uma conexão *de saída* para a Cloudflare, e o Service do app é `ClusterIP`, acessível só dentro do cluster.
+- **As senhas não entram na imagem nem no Git.** Elas ficam num Secret do Kubernetes, montado como arquivo somente leitura.
+- **Pods endurecidos:** rodam sem root, com sistema de arquivos somente leitura, `drop: [ALL]` nas capabilities, `seccomp RuntimeDefault` e sem token da service account.
+
+## UML
+
+### Componentes do servidor
+
+```mermaid
+classDiagram
+    direction LR
+    class index_js {
+        lê variáveis de ambiente
+        carrega users.json
+        createApp().listen(PORT)
+    }
+    class app_js {
+        +createApp(users, dataDir, trustProxy, pushOptions, weatherOptions) Server
+        -handleApi(req, res, pathname, searchParams)
+        -serveStatic(req, res, pathname)
+        -WebSocketServer live
+        -broadcast(message)
+    }
+    class auth_js {
+        +normalizeUsername(nome) string
+        +hashPassword(senha) salt, hash
+        +verifyPassword(senha, salt, hash) bool
+        +createSessions(arquivo)
+        +createLoginLimiter(max, windowMs)
+    }
+    class store_js {
+        +createTodoStore(dir)
+        +createMarketStore(dir)
+        +readJsonFile(arquivo, padrão)
+        +writeJsonFile(arquivo, dados)
+    }
+    class push_js {
+        +createPush(dataDir, options)
+        +isValidSubscription(inscrição) bool
+        +notifyOthers(userId, mensagem)
+    }
+    class weather_js {
+        +createWeather(fetch)
+        +forCoordinates(lat, lon) Report
+        +forIp(ip) Report
+    }
+    index_js --> app_js
+    app_js --> auth_js
+    app_js --> store_js
+    app_js --> push_js
+    app_js --> weather_js
+    push_js --> store_js
+```
+
+### Modelo de dados
+
+```mermaid
+classDiagram
+    class User {
+        id: string
+        name: string
+        salt: hex
+        hash: hex
+    }
+    class Session {
+        sha256(token): string
+        userId: string
+        expiresAt: number
+    }
+    class Todo {
+        id: uuid
+        text: string
+        done: boolean
+        dueDate: AAAA-MM-DD | null
+        createdAt: ISO 8601
+    }
+    class MarketList {
+        version: number
+        items: MarketItem[]
+    }
+    class MarketItem {
+        id: uuid
+        text: string
+        bought: boolean
+        addedBy: string
+        createdAt: ISO 8601
+    }
+    class PushSubscription {
+        endpoint: url
+        keys: p256dh, auth
+    }
+    class WeatherReport {
+        place: string | null
+        temperature: number
+        weatherCode: WMO
+        isDay: boolean
+        max: number
+        min: number
+        rainChance: number | null
+    }
+    User "1" -- "*" Session
+    User "1" -- "*" Todo : lista privada
+    User "1" -- "*" PushSubscription : aparelhos
+    MarketList "1" *-- "*" MarketItem : compartilhada
+    User "1" -- "*" MarketItem : addedBy
+```
+
+### Sequência: item novo no mercado
+
+```mermaid
+sequenceDiagram
+    actor Carlos
+    participant A as PWA (Carlos)
+    participant S as Servidor Node
+    participant D as /data (JSON)
+    participant B as PWA (Monica, aberto)
+    participant P as Serviço de push
+    actor Monica
+
+    Carlos->>A: digita "café" e toca em +
+    A->>S: POST /api/market {text}
+    S->>S: valida a sessão (cookie) e o texto
+    S->>D: grava market.json (tmp + rename)
+    S-->>A: 201 com a lista nova
+    S-)B: WebSocket: lista nova e evento
+    B->>B: atualiza a tela ao vivo
+    S-)P: Web Push para os aparelhos dos outros usuários
+    P-)Monica: notificação "Carlos adicionou café"
+```
+
+### Sequência: previsão do tempo no rodapé
+
+```mermaid
+sequenceDiagram
+    participant N as PWA
+    participant S as Servidor Node
+    participant C as Cache (15 min)
+    participant I as ipwho.is
+    participant O as Nominatim
+    participant M as Open-Meteo
+
+    alt GPS autorizado no aparelho
+        N->>N: navigator.geolocation
+        N->>S: GET /api/weather?lat&lon
+        S->>S: arredonda para ~1 km
+        S->>C: nome da cidade em cache?
+        C-->>S: não
+        S->>O: reverse geocoding
+        O-->>S: "Tubarão"
+    else sem GPS
+        N->>S: GET /api/weather
+        S->>I: local pelo IP do visitante
+        I-->>S: cidade e coordenadas
+    end
+    S->>C: previsão em cache?
+    C-->>S: não
+    S->>M: forecast (atual + dia)
+    M-->>S: temperatura, código WMO, máx/mín, chuva
+    S-->>N: WeatherReport
+    N->>N: rodapé: ícone, 22°, 24°/16°, chuva 100%
+```
+
+## API
+
+Todas as rotas `/api/*` exigem login, exceto `login` e `logout`. As respostas são JSON com `Cache-Control: no-store`.
+
+| Método | Rota | Descrição |
+|---|---|---|
+| `POST` | `/api/login` | Entra com `{username, password}` e define o cookie de sessão |
+| `POST` | `/api/logout` | Encerra a sessão e as conexões em tempo real dela |
+| `GET` | `/api/me` | Usuário logado |
+| `GET` | `/api/todos` | Tarefas do usuário |
+| `POST` | `/api/todos` | Cria uma tarefa `{text, dueDate?}` |
+| `PATCH` | `/api/todos/:id` | Altera `text`, `dueDate` e/ou `done` |
+| `DELETE` | `/api/todos/:id` | Apaga uma tarefa |
+| `POST` | `/api/todos/clear-done` | Apaga as concluídas |
+| `GET` | `/api/market` | Lista de mercado |
+| `POST` | `/api/market` | Adiciona um item `{text}` e notifica os outros usuários |
+| `PATCH` | `/api/market/:id` | Marca como comprado `{bought}` |
+| `DELETE` | `/api/market/:id` | Remove um item |
+| `POST` | `/api/market/clear-bought` | Apaga os comprados |
+| `WS` | `/api/market/live` | Lista de mercado em tempo real (exige mesma origem e sessão) |
+| `GET` | `/api/push/key` | Chave pública VAPID |
+| `POST` | `/api/push/subscribe` | Registra o aparelho para notificações |
+| `POST` | `/api/push/unsubscribe` | Cancela a inscrição do aparelho |
+| `GET` | `/api/weather?lat=&lon=` | Previsão do tempo (sem `lat`/`lon`, usa o local pelo IP) |
+| `GET` | `/healthz` | Verificação de saúde, usada pelas probes do Kubernetes |
+
+### APIs externas
+
+| API | Uso | Chave |
+|---|---|---|
+| [Open-Meteo](https://open-meteo.com) | Previsão: temperatura atual, código do tempo (WMO), máxima, mínima e chance de chuva | Não precisa |
+| [ipwho.is](https://ipwho.is) | Cidade e coordenadas aproximadas pelo IP do visitante | Não precisa |
+| [Nominatim / OpenStreetMap](https://nominatim.org) | Nome da cidade a partir das coordenadas do GPS | Não precisa |
+| Web Push (FCM, Apple, Mozilla, Windows) | Entrega das notificações; só esses serviços são aceitos | VAPID, gerada pelo app |
+
+As coordenadas são arredondadas para cerca de 1 km e as respostas ficam 15 minutos em cache na memória. Se uma API cair, só o rodapé some; o resto do app continua funcionando.
+
+## Segurança
+
+- Senhas guardadas só como hash **scrypt** com salt. A comparação usa `timingSafeEqual`, e um usuário inexistente leva o mesmo tempo para responder que uma senha errada.
+- No disco fica só o **hash SHA-256** do token de sessão: quem ler o arquivo de sessões não consegue se passar por ninguém.
+- **Limite de tentativas de login** por visitante (5 em 15 min) e por conta (20 por hora, mesmo trocando de IP).
+- Cabeçalhos `Content-Security-Policy: default-src 'self'`, `X-Content-Type-Options` e `Referrer-Policy`. Os arquivos estáticos são servidos a partir de uma lista fixa, então nenhum caminho vindo da URL chega ao disco.
+- O WebSocket confere a origem e a sessão. As inscrições de push só aceitam serviços conhecidos, para impedir SSRF.
+- Toda operação usa o `userId` da sessão, nunca o enviado pelo cliente.
+
+## Testes realizados
+
+**48 testes automatizados, todos passando** (`npm test`, com `node:test`). Eles sobem o servidor de verdade numa porta aleatória, com dados num diretório temporário. O push e as APIs de clima são simulados, então os testes não dependem da internet.
+
+```
+ℹ tests 48
+ℹ pass 48
+ℹ fail 0
+```
+
+| Grupo | O que é verificado |
+|---|---|
+| **Login e sessão** | Recusa senha errada e usuário inexistente; a senha de um usuário não entra na conta do outro; aceita maiúsculas e acentos no nome; cookie `HttpOnly`, `SameSite=Strict` e `Secure` com HTTPS; logout invalida a sessão; sessões sobrevivem a reiniciar o servidor sem guardar o token |
+| **Limite de tentativas** | Muitas senhas erradas bloqueiam até a senha certa; atrás do túnel, o limite vale por visitante; trocar de IP não escapa do limite por conta; sem túnel, o cabeçalho de IP é ignorado |
+| **Tarefas** | Criar, editar, concluir e apagar; reagendar e tirar a data; concluir não apaga a data; texto e data inválidos são recusados |
+| **Privacidade** | Cada usuário vê só a própria lista; não altera nem apaga tarefa do outro pelo id; o cliente não escolhe de quem é a lista; apagar concluídas só afeta a própria lista |
+| **Mercado e tempo real** | Lista igual para todos; um usuário marca e apaga item do outro; item novo chega ao vivo; quem conecta depois recebe a lista atual; o WebSocket exige login e mesma origem; logout encerra a conexão |
+| **Notificações** | Vão só para os outros usuários; marcar como comprado não notifica; o aparelho passa para quem entrou por último; o usuário só cancela a própria inscrição; inscrição cancelada pelo navegador é removida; falha no push não impede adicionar o item; só serviços de push conhecidos são aceitos; a chave VAPID persiste |
+| **Previsão do tempo** | Exige login; o GPS traz a cidade e arredonda as coordenadas; sem GPS usa o IP, e um IP interno cai no IP público; o cache evita chamadas repetidas; coordenadas inválidas são recusadas; API fora do ar vira 502 sem derrubar o app |
+| **Servidor** | Arquivos do PWA e `/healthz` são públicos; arquivos do servidor e dados nunca são servidos; a página inicial sai com os cabeçalhos de segurança |
+
+**Validação em produção**
+
+- Depois de cada publicação, o endereço público foi testado: `/`, `/healthz`, `/manifest.webmanifest` e `/sw.js` responderam 200, e `/api/weather` respondeu 401 sem login.
+- O módulo de clima foi testado de dentro do pod, com as APIs reais, pelo IP e pelo GPS.
+- O app foi testado no celular Android (print acima): login, lista de mercado ao vivo e previsão do tempo no rodapé.
+
+## Estrutura do projeto
+
+```
+├── server/
+│   ├── index.js        # ponto de entrada: configuração e listen
+│   ├── app.js          # rotas HTTP, WebSocket e cabeçalhos de segurança
+│   ├── auth.js         # senhas (scrypt), sessões e limite de login
+│   ├── store.js        # tarefas e mercado em arquivos JSON
+│   ├── push.js         # notificações Web Push (VAPID)
+│   └── weather.js      # previsão do tempo (Open-Meteo, ipwho.is, Nominatim)
+├── public/
+│   ├── index.html      # interface (login, lista, calendário, mercado, rodapé)
+│   ├── app.js          # lógica do cliente
+│   ├── style.css       # tema escuro e layout responsivo
+│   ├── sw.js           # service worker: cache do shell e push
+│   ├── manifest.webmanifest
+│   └── icons/
+├── test/app.test.js    # 48 testes de integração
+├── k8s/                # namespace, PVC, Deployments, Service e túnel
+├── scripts/
+│   ├── deploy.ps1      # build da imagem e publicação no Kubernetes
+│   └── set-password.js # cria usuário ou troca senha
+├── docs/screenshots/
+└── Dockerfile
+```
 
 ## Publicar no Kubernetes
 
@@ -13,7 +355,21 @@ Precisa do Docker Desktop com o Kubernetes ligado. Na pasta do projeto, em Power
 .\scripts\deploy.ps1
 ```
 
-O script constrói a imagem, publica no namespace `todo-list` e mostra o endereço público. Use o mesmo comando para publicar atualizações. Publicar de novo não troca o endereço.
+O script roda quatro etapas:
+
+1. Constrói a imagem com uma tag nova (`to-do-list:<versão>-<data-hora>`).
+2. Cria ou atualiza o Secret com as senhas.
+3. Aplica os manifests.
+4. Espera o rollout e mostra o endereço público.
+
+Use o mesmo comando para publicar atualizações. Publicar de novo não troca o endereço.
+
+Os pods do Kubernetes não aparecem na lista de containers do Docker Desktop. Para vê-los:
+
+```
+kubectl -n todo-list get pods
+kubectl -n todo-list logs deployment/todo
+```
 
 ### Descobrir o endereço público
 
@@ -25,10 +381,10 @@ kubectl -n todo-list logs deployment/cloudflared | Select-String trycloudflare
 
 Quando o endereço muda, o app instalado no celular para de funcionar. É preciso abrir o endereço novo, instalar de novo, entrar e ativar os avisos outra vez. Um endereço fixo exige uma conta na Cloudflare e um domínio próprio, com um túnel nomeado no lugar do túnel rápido em [k8s/todo-list.yaml](k8s/todo-list.yaml).
 
-### Limitações
+### Disponibilidade
 
-- O app fica no ar só enquanto o computador e o Docker Desktop estiverem ligados.
-- Fica em uma réplica só, de propósito: os dados são arquivos e o tempo real roda em memória.
+- O app continua no ar com o editor e o terminal fechados. Ele só para quando o computador ou o Docker Desktop é desligado.
+- Com a opção "Start Docker Desktop when you sign in" ligada, o app volta sozinho depois de reiniciar o computador, mas com um endereço novo.
 
 ## Instalar no celular
 
@@ -36,6 +392,8 @@ Quando o endereço muda, o app instalado no celular para de funcionar. É precis
 - **iPhone (Safari):** toque em Compartilhar e em **Adicionar à Tela de Início**. No iPhone, as notificações só funcionam com o app instalado e com iOS 16.4 ou mais novo.
 
 Depois, na aba Mercado, toque em **Ativar avisos**. Cada usuário precisa fazer isso no próprio aparelho. A primeira ativação pode levar cerca de 30 segundos.
+
+Para a previsão usar a localização exata, toque no nome da cidade no rodapé e permita o acesso à localização.
 
 ## Usuários e senhas
 
