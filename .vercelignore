@@ -1,0 +1,6 @@
+data
+docs
+test
+server/users.json
+server/pglite.js
+.env*

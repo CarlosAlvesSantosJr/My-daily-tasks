@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE = 'shell-v2';
+const CACHE = 'shell-v3';
 const SHELL = [
   '/',
   '/style.css',

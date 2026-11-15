@@ -4,13 +4,12 @@ const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
 
-const { WebSocket, WebSocketServer } = require('ws');
-
 const {
   normalizeUsername,
   verifyPassword,
   createSessions,
   createLoginLimiter,
+  createUsers,
 } = require('./auth');
 const { createPush } = require('./push');
 const { createMarketStore, createTodoStore, toUpperText } = require('./store');
@@ -20,9 +19,6 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const MAX_BODY_BYTES = 10 * 1024;
 const MAX_TEXT_LENGTH = 500;
 const COOKIE_NAME = 'sid';
-const LIVE_PATH = '/api/market/live';
-// Abaixo do tempo em que proxies e túneis derrubam conexões paradas.
-const HEARTBEAT_MS = 30 * 1000;
 
 // Lista fixa de arquivos: nenhum caminho vindo da URL chega ao disco.
 const STATIC_FILES = {
@@ -45,6 +41,9 @@ const SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
 };
+
+// Usuário inexistente gasta o mesmo tempo que senha errada.
+const DECOY = { salt: '00'.repeat(16), hash: '00'.repeat(64) };
 
 class HttpError extends Error {
   constructor(status, message, headers = {}) {
@@ -122,52 +121,35 @@ function sessionCookie(req, value, maxAgeSeconds) {
   return `${COOKIE_NAME}=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}${secure}`;
 }
 
-/** Rejeita páginas de outros sites tentando abrir o WebSocket com o cookie. */
-function isSameOrigin(req) {
-  try {
-    return new URL(req.headers.origin).host === req.headers.host;
-  } catch {
-    return false;
-  }
-}
-
 /**
- * `trustProxy` só pode ser ligado quando o app é acessível apenas pelo túnel
- * da Cloudflare; fora disso, qualquer um poderia forjar este cabeçalho.
+ * Monta o tratador de pedidos. O mesmo código roda como função serverless na
+ * Vercel (api/index.js) e como servidor Node local (server/index.js).
+ *
+ * `trustProxy` só pode ser ligado atrás de um proxy que sobrescreve o
+ * cabeçalho `x-real-ip` (a Vercel faz isso); fora dele, qualquer um o forjaria.
  */
-function createApp({ users, dataDir, trustProxy = false, pushOptions, weatherOptions }) {
-  const usersById = new Map(users.map((user) => [user.id, user]));
-  const sessions = createSessions(path.join(dataDir, 'sessions.json'));
-  const limiter = createLoginLimiter();
+function createHandler({ db, trustProxy = false, pushOptions, weatherOptions }) {
+  const users = createUsers(db);
+  const sessions = createSessions(db);
+  const limiter = createLoginLimiter(db, { name: 'ip' });
   // Limite por conta: quem troca de IP a cada tentativa não escapa dele.
-  const accountLimiter = createLoginLimiter({ max: 20, windowMs: 60 * 60 * 1000 });
-  const todos = createTodoStore(dataDir);
-  const market = createMarketStore(dataDir);
-  const push = createPush(dataDir, pushOptions);
+  const accountLimiter = createLoginLimiter(db, {
+    name: 'conta', max: 20, windowMs: 60 * 60 * 1000,
+  });
+  const todos = createTodoStore(db);
+  const market = createMarketStore(db);
+  const push = createPush(db, pushOptions);
   const weather = createWeather(weatherOptions);
-  const live = new WebSocketServer({ noServer: true, maxPayload: 1024 });
-  // Usuário inexistente gasta o mesmo tempo que senha errada.
-  const decoy = users[0];
 
   function clientIp(req) {
-    return (trustProxy && req.headers['cf-connecting-ip']) || req.socket.remoteAddress;
+    return (trustProxy && req.headers['x-real-ip']) || req.socket.remoteAddress || '';
   }
 
-  function currentUser(req) {
-    return usersById.get(sessions.userIdFor(readCookie(req, COOKIE_NAME))) || null;
-  }
-
-  function requireUser(req) {
-    const user = currentUser(req);
+  async function requireUser(req) {
+    const userId = await sessions.userIdFor(readCookie(req, COOKIE_NAME));
+    const user = userId && await users.get(userId);
     if (!user) throw new HttpError(401, 'Faça login para continuar.');
     return user;
-  }
-
-  function broadcast(message) {
-    const data = JSON.stringify(message);
-    for (const client of live.clients) {
-      if (client.readyState === WebSocket.OPEN) client.send(data);
-    }
   }
 
   async function login(req, res) {
@@ -176,9 +158,12 @@ function createApp({ users, dataDir, trustProxy = false, pushOptions, weatherOpt
       throw new HttpError(400, 'Informe usuário e senha.');
     }
 
-    const user = usersById.get(normalizeUsername(username));
+    const user = await users.get(normalizeUsername(username));
     const key = `${clientIp(req)}|${user ? user.id : '?'}`;
-    const wait = Math.max(limiter.retryAfter(key), user ? accountLimiter.retryAfter(user.id) : 0);
+    const wait = Math.max(
+      await limiter.retryAfter(key),
+      user ? await accountLimiter.retryAfter(user.id) : 0,
+    );
     if (wait > 0) {
       const minutes = Math.ceil(wait / 60);
       throw new HttpError(
@@ -187,26 +172,22 @@ function createApp({ users, dataDir, trustProxy = false, pushOptions, weatherOpt
         { 'Retry-After': String(wait) },
       );
     }
-    limiter.hit(key);
-    if (user) accountLimiter.hit(user.id);
+    await limiter.hit(key);
+    if (user) await accountLimiter.hit(user.id);
 
-    const valid = await verifyPassword(password, user || decoy);
+    const valid = await verifyPassword(password, user || DECOY);
     if (!user || !valid) throw new HttpError(401, 'Usuário ou senha incorretos.');
 
-    limiter.reset(key);
-    accountLimiter.reset(user.id);
-    const token = sessions.create(user.id);
+    await limiter.reset(key);
+    await accountLimiter.reset(user.id);
+    const token = await sessions.create(user.id);
     sendJson(res, 200, { name: user.name }, {
       'Set-Cookie': sessionCookie(req, token, sessions.ttlMs / 1000),
     });
   }
 
-  function logout(req, res) {
-    const token = readCookie(req, COOKIE_NAME);
-    sessions.destroy(token);
-    for (const client of live.clients) {
-      if (client.sessionToken === token) client.close();
-    }
+  async function logout(req, res) {
+    await sessions.destroy(readCookie(req, COOKIE_NAME));
     sendJson(res, 204, undefined, { 'Set-Cookie': sessionCookie(req, '', 0) });
   }
 
@@ -219,32 +200,35 @@ function createApp({ users, dataDir, trustProxy = false, pushOptions, weatherOpt
       if (typeof body.done !== 'boolean') throw new HttpError(400, 'Valor inválido.');
       changes.done = body.done;
     }
-    const todo = todos.update(userId, id, changes);
+    const todo = await todos.update(userId, id, changes);
     if (!todo) throw new HttpError(404, 'Tarefa não encontrada.');
     sendJson(res, 200, todo);
   }
 
-  /** Responde a quem pediu e atualiza na hora quem está com o app aberto. */
-  function sendMarket(res, status, state, event) {
+  function sendMarket(res, status, state) {
     if (!state) throw new HttpError(404, 'Item não encontrado.');
-    broadcast({ ...state, event });
     sendJson(res, status, state);
   }
 
+  /**
+   * A notificação sai antes da resposta: numa função serverless, o que roda
+   * depois da resposta pode ser congelado no meio.
+   */
   async function addMarketItem(req, res, user) {
     const { text: rawText } = await readJson(req);
     const text = toUpperText(parseText(rawText, 'Escreva o item.'));
-    sendMarket(res, 201, market.add(text, user.name), { by: user.name, text });
+    const state = await market.add(text, user.name);
     await push.notifyOthers(user.id, {
       title: 'Lista de mercado',
       body: `${user.name} adicionou ${text}`,
     });
+    sendMarket(res, 201, state);
   }
 
   async function updateMarketItem(req, res, id) {
     const { bought } = await readJson(req);
     if (typeof bought !== 'boolean') throw new HttpError(400, 'Valor inválido.');
-    sendMarket(res, 200, market.setBought(id, bought));
+    sendMarket(res, 200, await market.setBought(id, bought));
   }
 
   async function subscribePush(req, res, user) {
@@ -252,13 +236,13 @@ function createApp({ users, dataDir, trustProxy = false, pushOptions, weatherOpt
     if (!push.isValidSubscription(subscription)) {
       throw new HttpError(400, 'Inscrição de notificação inválida.');
     }
-    push.subscribe(user.id, subscription);
+    await push.subscribe(user.id, subscription);
     sendJson(res, 204);
   }
 
   async function unsubscribePush(req, res, user) {
     const { endpoint } = await readJson(req);
-    push.unsubscribe(user.id, endpoint);
+    await push.unsubscribe(user.id, endpoint);
     sendJson(res, 204);
   }
 
@@ -292,27 +276,27 @@ function createApp({ users, dataDir, trustProxy = false, pushOptions, weatherOpt
     if (route === 'POST /api/login') return login(req, res);
     if (route === 'POST /api/logout') return logout(req, res);
 
-    const user = requireUser(req);
+    const user = await requireUser(req);
 
     if (route === 'GET /api/me') return sendJson(res, 200, { name: user.name });
     if (route === 'GET /api/weather') return sendWeather(req, res, searchParams);
 
-    if (route === 'GET /api/todos') return sendJson(res, 200, todos.list(user.id));
+    if (route === 'GET /api/todos') return sendJson(res, 200, await todos.list(user.id));
     if (route === 'POST /api/todos') {
       const { text, dueDate } = await readJson(req);
-      return sendJson(res, 201, todos.add(user.id, parseText(text), parseDueDate(dueDate)));
+      return sendJson(res, 201, await todos.add(user.id, parseText(text), parseDueDate(dueDate)));
     }
     if (route === 'POST /api/todos/clear-done') {
-      return sendJson(res, 200, todos.clearDone(user.id));
+      return sendJson(res, 200, await todos.clearDone(user.id));
     }
 
-    if (route === 'GET /api/market') return sendJson(res, 200, market.read());
+    if (route === 'GET /api/market') return sendJson(res, 200, await market.read());
     if (route === 'POST /api/market') return addMarketItem(req, res, user);
     if (route === 'POST /api/market/clear-bought') {
-      return sendMarket(res, 200, market.clearBought());
+      return sendMarket(res, 200, await market.clearBought());
     }
 
-    if (route === 'GET /api/push/key') return sendJson(res, 200, { key: push.publicKey });
+    if (route === 'GET /api/push/key') return sendJson(res, 200, { key: await push.publicKey() });
     if (route === 'POST /api/push/subscribe') return subscribePush(req, res, user);
     if (route === 'POST /api/push/unsubscribe') return unsubscribePush(req, res, user);
 
@@ -321,7 +305,7 @@ function createApp({ users, dataDir, trustProxy = false, pushOptions, weatherOpt
       return updateTodo(req, res, user.id, todoMatch[1]);
     }
     if (todoMatch && req.method === 'DELETE') {
-      if (!todos.remove(user.id, todoMatch[1])) {
+      if (!await todos.remove(user.id, todoMatch[1])) {
         throw new HttpError(404, 'Tarefa não encontrada.');
       }
       return sendJson(res, 204);
@@ -332,12 +316,13 @@ function createApp({ users, dataDir, trustProxy = false, pushOptions, weatherOpt
       return updateMarketItem(req, res, marketMatch[1]);
     }
     if (marketMatch && req.method === 'DELETE') {
-      return sendMarket(res, 200, market.remove(marketMatch[1]));
+      return sendMarket(res, 200, await market.remove(marketMatch[1]));
     }
 
     throw new HttpError(404, 'Não encontrado.');
   }
 
+  /** Na Vercel os arquivos de public/ saem direto da CDN; isto serve o modo local. */
   function serveStatic(req, res, pathname) {
     const entry = STATIC_FILES[pathname];
     if (!entry || (req.method !== 'GET' && req.method !== 'HEAD')) {
@@ -351,13 +336,13 @@ function createApp({ users, dataDir, trustProxy = false, pushOptions, weatherOpt
     res.end(req.method === 'HEAD' ? undefined : content);
   }
 
-  const server = http.createServer(async (req, res) => {
+  return async function handler(req, res) {
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
       res.setHeader(name, value);
     }
     try {
       const { pathname, searchParams } = new URL(req.url, 'http://localhost');
-      if (pathname === '/healthz') sendJson(res, 200, { ok: true });
+      if (pathname === '/healthz' || pathname === '/api/healthz') sendJson(res, 200, { ok: true });
       else if (pathname.startsWith('/api/')) await handleApi(req, res, pathname, searchParams);
       else serveStatic(req, res, pathname);
     } catch (err) {
@@ -371,38 +356,12 @@ function createApp({ users, dataDir, trustProxy = false, pushOptions, weatherOpt
         else sendJson(res, 500, { error: 'Erro no servidor. Tente de novo.' });
       }
     }
-  });
-
-  server.on('upgrade', (req, socket, head) => {
-    const reject = (status) => socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`);
-
-    if (req.url !== LIVE_PATH) return reject('404 Not Found');
-    if (!isSameOrigin(req)) return reject('403 Forbidden');
-    if (!currentUser(req)) return reject('401 Unauthorized');
-
-    return live.handleUpgrade(req, socket, head, (client) => {
-      client.sessionToken = readCookie(req, COOKIE_NAME);
-      client.isAlive = true;
-      client.on('pong', () => { client.isAlive = true; });
-      client.on('error', () => client.terminate());
-      client.send(JSON.stringify(market.read()));
-    });
-  });
-
-  const heartbeat = setInterval(() => {
-    for (const client of live.clients) {
-      if (!client.isAlive || !sessions.userIdFor(client.sessionToken)) {
-        client.terminate();
-      } else {
-        client.isAlive = false;
-        client.ping();
-      }
-    }
-  }, HEARTBEAT_MS);
-  heartbeat.unref();
-  server.on('close', () => clearInterval(heartbeat));
-
-  return server;
+  };
 }
 
-module.exports = { createApp };
+/** Servidor Node com o mesmo tratador: usado no modo local e nos testes. */
+function createApp(options) {
+  return http.createServer(createHandler(options));
+}
+
+module.exports = { createApp, createHandler };

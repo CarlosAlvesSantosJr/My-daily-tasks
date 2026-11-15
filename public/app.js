@@ -21,6 +21,7 @@ const initialState = () => ({
   userName: null,
   market: [],
   marketVersion: 0,
+  marketLoaded: false, // a primeira lista não gera avisos
   marketUnseen: 0, // itens dos outros ainda não vistos na aba Mercado
   live: false, // conexão em tempo real aberta
   pushEnabled: false,
@@ -460,62 +461,69 @@ function openView(view) {
  * Aplica o estado vindo do servidor. Em outra aba, só atualiza o contador:
  * redesenhar ali derrubaria o foco de quem está digitando.
  */
-function applyMarket({ version, items, event }) {
+function applyMarket({ version, items }) {
   if (version < state.marketVersion) return;
+  const changed = !state.marketLoaded || version !== state.marketVersion;
+  const known = new Set(state.market.map((item) => item.id));
+  const firstLoad = !state.marketLoaded;
+  state.marketLoaded = true;
   state.marketVersion = version;
   state.market = items;
+  if (!changed) return;
 
-  if (event && event.by !== state.userName) {
-    showToast(`${event.by} adicionou ${event.text}`);
-    if (state.view !== 'market') state.marketUnseen += 1;
+  // Itens que os outros adicionaram desde a última consulta.
+  const fresh = firstLoad ? [] : items.filter((item) => (
+    !known.has(item.id) && item.addedBy !== state.userName
+  ));
+  if (fresh.length > 0) {
+    showToast(`${fresh[0].addedBy} adicionou ${fresh.map((item) => item.text).join(', ')}`);
+    if (state.view !== 'market') state.marketUnseen += fresh.length;
   }
   if (state.view === 'market') render();
   else renderBadge();
 }
 
-let socket = null;
-let reconnectTimer;
-let reconnectDelay = 1000;
+// A Vercel não mantém conexões abertas (WebSocket): o mercado é consultado a
+// cada poucos segundos, só enquanto o app está na tela. Em segundo plano quem
+// avisa é a notificação push.
+const POLL_MS = 5000;
+let pollTimer = null;
 
 function setLive(live) {
+  if (state.live === live) return;
   state.live = live;
   if (state.view === 'market') render();
 }
 
-function connectLive() {
-  clearTimeout(reconnectTimer);
-  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-  const current = new WebSocket(`${scheme}://${location.host}/api/market/live`);
-  socket = current;
-
-  current.addEventListener('open', () => {
-    reconnectDelay = 1000;
+async function pollMarket() {
+  clearTimeout(pollTimer);
+  pollTimer = null;
+  if (!state.userName || document.hidden) return;
+  try {
+    applyMarket(await api('/api/market'));
     setLive(true);
-  });
-  current.addEventListener('message', (message) => applyMarket(JSON.parse(message.data)));
-  current.addEventListener('close', () => {
-    if (socket !== current) return;
+  } catch (err) {
+    if (err.silent) return;
     setLive(false);
-    reconnectTimer = setTimeout(connectLive, reconnectDelay);
-    reconnectDelay = Math.min(reconnectDelay * 2, 30000);
-  });
+  }
+  if (state.userName && !document.hidden) pollTimer = setTimeout(pollMarket, POLL_MS);
+}
+
+function connectLive() {
+  setLive(true);
+  pollTimer = setTimeout(pollMarket, POLL_MS);
 }
 
 function disconnectLive() {
-  clearTimeout(reconnectTimer);
-  const current = socket;
-  socket = null;
-  if (current) current.close();
+  clearTimeout(pollTimer);
+  pollTimer = null;
 }
 
-/** Celular suspende a conexão em segundo plano: ao voltar, sincroniza na hora. */
+/** Ao voltar para o app, sincroniza na hora e retoma as consultas. */
 function resumeLive() {
-  if (!state.userName || document.hidden) return;
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
-    disconnectLive();
-    connectLive();
-  }
-  attempt(async () => applyMarket(await api('/api/market')));
+  if (!state.userName) return;
+  if (document.hidden) disconnectLive();
+  else pollMarket();
 }
 
 document.addEventListener('visibilitychange', resumeLive);

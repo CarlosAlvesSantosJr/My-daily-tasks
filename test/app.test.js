@@ -1,19 +1,15 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 const { after, before, beforeEach, test } = require('node:test');
 
-const { WebSocket } = require('ws');
-
 const { createApp } = require('../server/app');
-const { hashPassword } = require('../server/auth');
+const { hashPassword, createUsers } = require('../server/auth');
+const { createPgliteDb } = require('../server/pglite');
 
 let server;
 let baseUrl;
-let dataDir;
+let db;
 const pushed = [];
 let pushError = null;
 const weatherCalls = [];
@@ -42,35 +38,41 @@ async function fakeWeatherFetch(url) {
   });
 }
 
+/** Banco Postgres novo, em memória, com os usuários dados. */
+async function freshDb(users) {
+  const fresh = createPgliteDb();
+  const store = createUsers(fresh);
+  for (const user of users) await store.save(user);
+  return fresh;
+}
+
 before(async () => {
-  dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'todo-test-'));
-  const users = [
+  db = await freshDb([
     { id: 'ana', name: 'Ana', ...(await hashPassword('senha-ana')) },
     { id: 'bia', name: 'Bia', ...(await hashPassword('senha-bia')) },
     { id: 'limite', name: 'Limite', ...(await hashPassword('senha-limite')) },
     { id: 'semtunel', name: 'Sem Túnel', ...(await hashPassword('senha-semtunel')) },
-  ];
+  ]);
   const pushOptions = {
     send: async (subscription, payload) => {
       if (pushError) throw pushError;
       pushed.push({ endpoint: subscription.endpoint, message: JSON.parse(payload) });
     },
   };
-  server = createApp({ users, dataDir, pushOptions, weatherOptions: { fetch: fakeWeatherFetch } });
+  server = createApp({ db, pushOptions, weatherOptions: { fetch: fakeWeatherFetch } });
   await new Promise((resolve) => { server.listen(0, '127.0.0.1', resolve); });
   baseUrl = `http://127.0.0.1:${server.address().port}`;
 });
 
 after(async () => {
   await new Promise((resolve) => { server.close(resolve); });
-  fs.rmSync(dataDir, { recursive: true, force: true });
+  await db.close();
 });
 
-beforeEach(() => {
-  const files = ['todos-ana.json', 'todos-bia.json', 'market.json', 'push-subscriptions.json'];
-  for (const name of files) {
-    fs.rmSync(path.join(dataDir, name), { force: true });
-  }
+beforeEach(async () => {
+  await db.query('DELETE FROM todos');
+  await db.query('DELETE FROM market_items');
+  await db.query('DELETE FROM push_subscriptions');
   pushed.length = 0;
   pushError = null;
   weatherCalls.length = 0;
@@ -98,33 +100,6 @@ async function addTodo(cookie, text) {
   const response = await request('POST', '/api/todos', { cookie, body: { text } });
   assert.equal(response.status, 201);
   return response.json();
-}
-
-/** Abre o tempo real e guarda as mensagens, com `next()` para esperar a próxima. */
-function connectLive(cookie, origin = baseUrl) {
-  const socket = new WebSocket(`${baseUrl.replace('http', 'ws')}/api/market/live`, {
-    headers: { Origin: origin, ...(cookie ? { Cookie: cookie } : {}) },
-  });
-  const queue = [];
-  const waiting = [];
-  socket.on('message', (data) => {
-    const message = JSON.parse(data);
-    if (waiting.length > 0) waiting.shift()(message);
-    else queue.push(message);
-  });
-  socket.next = () => new Promise((resolve) => {
-    if (queue.length > 0) resolve(queue.shift());
-    else waiting.push(resolve);
-  });
-  return socket;
-}
-
-function upgradeStatus(socket) {
-  return new Promise((resolve) => {
-    socket.on('unexpected-response', (_req, res) => resolve(res.statusCode));
-    socket.on('open', () => resolve('open'));
-    socket.on('error', () => {});
-  });
 }
 
 const subscription = (name) => ({
@@ -223,60 +198,37 @@ test('rotas de mercado e notificação exigem login', async () => {
   }
 });
 
-test('tarefas continuam privadas com a lista de mercado no ar', async () => {
+test('tarefas continuam privadas mesmo com a lista de mercado compartilhada', async () => {
   const ana = await login('ana', 'senha-ana');
   const bia = await login('bia', 'senha-bia');
   await addTodo(ana, 'segredo da Ana');
-  const socket = connectLive(bia);
-  await socket.next();
   await addItem(ana, 'Leite');
 
-  const message = await socket.next();
-  socket.close();
-  assert.ok(!JSON.stringify(message).includes('segredo'));
+  const market = await (await request('GET', '/api/market', { cookie: bia })).json();
+  assert.ok(!JSON.stringify(market).includes('SEGREDO'));
   assert.deepEqual(await (await request('GET', '/api/todos', { cookie: bia })).json(), []);
 });
 
-test('item novo chega em tempo real para o outro usuário', async () => {
+test('item novo aparece na próxima consulta do outro usuário, com versão maior', async () => {
   const ana = await login('ana', 'senha-ana');
   const bia = await login('bia', 'senha-bia');
-  const socket = connectLive(bia);
-
-  const initial = await socket.next();
-  assert.deepEqual(initial.items, []);
+  const before = await (await request('GET', '/api/market', { cookie: bia })).json();
+  assert.deepEqual(before.items, []);
 
   await addItem(ana, 'Café');
-  const update = await socket.next();
-  socket.close();
-  assert.deepEqual(update.items.map((item) => item.text), ['CAFÉ']);
-  assert.deepEqual(update.event, { by: 'Ana', text: 'CAFÉ' });
-  assert.ok(update.version > initial.version);
+  const after = await (await request('GET', '/api/market', { cookie: bia })).json();
+  assert.deepEqual(after.items.map((item) => item.text), ['CAFÉ']);
+  assert.equal(after.items[0].addedBy, 'Ana');
+  assert.ok(after.version > before.version);
 });
 
-test('quem conecta depois recebe a lista atual', async () => {
-  const ana = await login('ana', 'senha-ana');
-  await addItem(ana, 'Arroz');
-  const socket = connectLive(await login('bia', 'senha-bia'));
-  const { items } = await socket.next();
-  socket.close();
-  assert.deepEqual(items.map((item) => item.text), ['ARROZ']);
-});
-
-test('tempo real exige login e a mesma origem', async () => {
-  assert.equal(await upgradeStatus(connectLive()), 401);
-  assert.equal(await upgradeStatus(connectLive('sid=token-falso')), 401);
-
+test('a versão do mercado só muda quando a lista muda', async () => {
   const cookie = await login('ana', 'senha-ana');
-  assert.equal(await upgradeStatus(connectLive(cookie, 'https://site-malicioso.example')), 403);
-});
-
-test('logout encerra a conexão em tempo real', async () => {
-  const cookie = await login('ana', 'senha-ana');
-  const socket = connectLive(cookie);
-  await socket.next();
-  const closed = new Promise((resolve) => { socket.on('close', resolve); });
-  await request('POST', '/api/logout', { cookie });
-  await closed;
+  const { version } = await addItem(cookie, 'Arroz');
+  await request('DELETE', '/api/market/00000000-0000-4000-8000-000000000000', { cookie });
+  await request('PATCH', '/api/market/nao-existe', { cookie, body: { bought: true } });
+  const now = await (await request('GET', '/api/market', { cookie })).json();
+  assert.equal(now.version, version);
 });
 
 test('notificação vai só para o outro usuário', async () => {
@@ -341,8 +293,7 @@ test('inscrição cancelada pelo navegador é removida', async () => {
 
   pushError = Object.assign(new Error('Gone'), { statusCode: 410 });
   await addItem(ana, 'Sal');
-  const saved = JSON.parse(fs.readFileSync(path.join(dataDir, 'push-subscriptions.json'), 'utf8'));
-  assert.deepEqual(saved, []);
+  assert.deepEqual(await db.query('SELECT * FROM push_subscriptions'), []);
 });
 
 test('falha ao notificar não impede de adicionar o item', async () => {
@@ -373,23 +324,30 @@ test('notificação só aceita serviços de push conhecidos', async () => {
   }
 });
 
-test('chave pública de notificação fica salva entre reinícios', async () => {
+test('chave pública de notificação fica salva no banco entre reinícios', async () => {
   const cookie = await login('ana', 'senha-ana');
   const { key } = await (await request('GET', '/api/push/key', { cookie })).json();
-  const saved = JSON.parse(fs.readFileSync(path.join(dataDir, 'vapid.json'), 'utf8'));
-  assert.equal(key, saved.publicKey);
+  const [saved] = await db.query("SELECT value FROM settings WHERE key = 'vapid'");
+  assert.equal(key, saved.value.publicKey);
+
+  const restarted = createApp({ db });
+  await new Promise((resolve) => { restarted.listen(0, '127.0.0.1', resolve); });
+  const response = await fetch(`http://127.0.0.1:${restarted.address().port}/api/push/key`, {
+    headers: { Cookie: cookie },
+  });
+  await new Promise((resolve) => { restarted.close(resolve); });
+  assert.equal((await response.json()).key, key);
 });
 
 async function withProxiedApp(callback) {
-  const proxyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'todo-proxy-'));
-  const users = [{ id: 'ana', name: 'Ana', ...(await hashPassword('senha-ana')) }];
-  const proxied = createApp({ users, dataDir: proxyDir, trustProxy: true });
+  const proxyDb = await freshDb([{ id: 'ana', name: 'Ana', ...(await hashPassword('senha-ana')) }]);
+  const proxied = createApp({ db: proxyDb, trustProxy: true });
   await new Promise((resolve) => { proxied.listen(0, '127.0.0.1', resolve); });
   const attempt = (ip, password = 'errada') => fetch(
     `http://127.0.0.1:${proxied.address().port}/api/login`,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Cf-Connecting-Ip': ip },
+      headers: { 'Content-Type': 'application/json', 'X-Real-Ip': ip },
       body: JSON.stringify({ username: 'ana', password }),
     },
   );
@@ -397,11 +355,11 @@ async function withProxiedApp(callback) {
     await callback(attempt);
   } finally {
     await new Promise((resolve) => { proxied.close(resolve); });
-    fs.rmSync(proxyDir, { recursive: true, force: true });
+    await proxyDb.close();
   }
 }
 
-test('atrás do túnel, o limite de login é por visitante', async () => {
+test('atrás do proxy da Vercel, o limite de login é por visitante', async () => {
   await withProxiedApp(async (attempt) => {
     for (let i = 0; i < 5; i += 1) await attempt('203.0.113.1');
     assert.equal((await attempt('203.0.113.1')).status, 429);
@@ -418,10 +376,10 @@ test('trocar de IP não escapa do limite por conta', async () => {
   });
 });
 
-test('sem túnel, o cabeçalho de IP é ignorado', async () => {
+test('fora da Vercel, o cabeçalho de IP é ignorado', async () => {
   const send = (ip) => fetch(`${baseUrl}/api/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Cf-Connecting-Ip': ip },
+    headers: { 'Content-Type': 'application/json', 'X-Real-Ip': ip },
     body: JSON.stringify({ username: 'semtunel', password: 'x' }),
   });
   for (let i = 0; i < 5; i += 1) await send(`203.0.113.${i}`);
@@ -598,6 +556,26 @@ test('tarefa inválida é recusada', async () => {
   assert.equal(badDone.status, 400);
 });
 
+test('id que não é UUID responde 404 sem erro no banco', async () => {
+  const cookie = await login('ana', 'senha-ana');
+  for (const [method, url, body] of [
+    ['PATCH', '/api/todos/nao-existe', { done: true }],
+    ['DELETE', '/api/todos/1', undefined],
+    ['PATCH', '/api/market/abc', { bought: true }],
+    ['DELETE', '/api/market/abc', undefined],
+  ]) {
+    const response = await request(method, url, { cookie, body });
+    assert.equal(response.status, 404, `${method} ${url}`);
+  }
+});
+
+test('sessão vencida no banco não dá mais acesso', async () => {
+  const cookie = await login('ana', 'senha-ana');
+  await db.query('UPDATE sessions SET expires_at = 0');
+  const response = await request('GET', '/api/todos', { cookie });
+  assert.equal(response.status, 401);
+});
+
 test('tarefa pode ser criada, reagendada e ficar sem data', async () => {
   const cookie = await login('ana', 'senha-ana');
   assert.equal((await addTodo(cookie, 'sem data')).dueDate, null);
@@ -661,14 +639,14 @@ test('logout invalida a sessão no servidor', async () => {
   assert.equal(response.status, 401);
 });
 
-test('sessões sobrevivem a reiniciar o servidor e não guardam o token', async () => {
+test('sessões ficam no banco, sobrevivem a reiniciar o servidor e não guardam o token', async () => {
   const cookie = await login('ana', 'senha-ana');
   const token = cookie.split('=')[1];
-  const saved = fs.readFileSync(path.join(dataDir, 'sessions.json'), 'utf8');
+  const saved = JSON.stringify(await db.query('SELECT * FROM sessions'));
+  assert.ok(saved.length > 2);
   assert.ok(!saved.includes(token));
 
-  const users = [{ id: 'ana', name: 'Ana', ...(await hashPassword('x')) }];
-  const restarted = createApp({ users, dataDir });
+  const restarted = createApp({ db });
   await new Promise((resolve) => { restarted.listen(0, '127.0.0.1', resolve); });
   const { port } = restarted.address();
   const response = await fetch(`http://127.0.0.1:${port}/api/me`, {
@@ -692,11 +670,14 @@ test('muitas senhas erradas bloqueiam novas tentativas, mesmo com a senha certa'
 
 test('arquivos do servidor e dados não são servidos', async () => {
   const paths = [
-    '/server/users.json',
-    '/data/todos-ana.json',
-    '/../server/users.json',
-    '/%2e%2e/server/users.json',
-    '/..%2fserver%2fusers.json',
+    '/server/db.js',
+    '/vercel.json',
+    '/package.json',
+    '/.env.local',
+    '/data/pglite/PG_VERSION',
+    '/../server/app.js',
+    '/%2e%2e/server/app.js',
+    '/..%2fserver%2fapp.js',
   ];
   for (const url of paths) {
     const response = await request('GET', url);

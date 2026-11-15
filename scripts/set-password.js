@@ -1,13 +1,16 @@
 'use strict';
 
-// Cria um usuário ou troca a senha: node scripts/set-password.js <nome> <senha>
+// Cria um usuário ou troca a senha, direto no banco.
+//
+//   Produção (Neon):  node --env-file=.env.local scripts/set-password.js <nome> <senha>
+//   Local (PGlite):   node scripts/set-password.js <nome> <senha>
+//
+// O .env.local vem de `vercel env pull` e não vai para o Git.
 
-const fs = require('node:fs');
 const path = require('node:path');
 
-const { hashPassword, normalizeUsername } = require('../server/auth');
-
-const USERS_FILE = path.join(__dirname, '..', 'server', 'users.json');
+const { hashPassword, normalizeUsername, createUsers } = require('../server/auth');
+const { createNeonDb } = require('../server/db');
 
 async function main() {
   const [name, password] = process.argv.slice(2);
@@ -16,18 +19,19 @@ async function main() {
     process.exit(1);
   }
 
-  const users = fs.existsSync(USERS_FILE)
-    ? JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'))
-    : [];
-  const id = normalizeUsername(name);
-  const user = { id, name, ...(await hashPassword(password)) };
-  const index = users.findIndex((item) => item.id === id);
+  let db;
+  if (process.env.DATABASE_URL) db = createNeonDb();
+  else {
+    const { createPgliteDb } = require('../server/pglite');
+    db = createPgliteDb(process.env.DATA_DIR || path.join(__dirname, '..', 'data', 'pglite'));
+  }
 
-  if (index === -1) users.push(user);
-  else users[index] = user;
-
-  fs.writeFileSync(USERS_FILE, `${JSON.stringify(users, null, 2)}\n`);
-  console.log(`Senha de ${name} salva.`);
+  await createUsers(db).save({ id: normalizeUsername(name), name, ...(await hashPassword(password)) });
+  console.log(`Senha de ${name} salva ${process.env.DATABASE_URL ? 'no Neon' : 'no banco local'}.`);
+  if (db.close) await db.close();
 }
 
-main();
+main().catch((err) => {
+  console.error(err.message);
+  process.exit(1);
+});

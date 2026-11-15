@@ -1,151 +1,139 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const fs = require('node:fs');
-const path = require('node:path');
 
 /** Tarefas e itens de mercado ficam sempre em maiúsculas. */
 const toUpperText = (text) => text.toLocaleUpperCase('pt-BR');
 
-/** Devolve o JSON do arquivo, ou `fallback` se ele ainda não existe. */
-function readJsonFile(file, fallback) {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch (err) {
-    if (err.code === 'ENOENT') return fallback;
-    throw err;
-  }
-}
+const toTodo = (row) => ({
+  id: row.id,
+  text: row.text,
+  done: row.done,
+  dueDate: row.due_date,
+  createdAt: new Date(row.created_at).toISOString(),
+});
+
+const toItem = (row) => ({
+  id: row.id,
+  text: row.text,
+  bought: row.bought,
+  addedBy: row.added_by,
+  createdAt: new Date(row.created_at).toISOString(),
+});
+
+/** O id vem da URL: o que não é UUID não existe, sem nem consultar o banco. */
+const isUuid = (id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
 
 /**
- * A escrita síncrona com rename evita arquivo pela metade e, como o Node é
- * single-thread, duas escritas nunca se misturam.
+ * Tarefas privadas. Toda consulta filtra por `user_id`, que vem sempre da
+ * sessão, nunca do cliente: o id de uma tarefa do outro não encontra nada.
  */
-function writeJsonFile(file, data) {
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
-  fs.renameSync(tmp, file);
-}
-
-/**
- * Um arquivo por usuário. Toda operação exige o userId, que vem sempre da
- * sessão, nunca do cliente.
- */
-function createTodoStore(dir) {
-  fs.mkdirSync(dir, { recursive: true });
-
-  const fileFor = (userId) => path.join(dir, `todos-${userId}.json`);
-  // As gravadas antes da regra das maiúsculas são convertidas na leitura.
-  const read = (userId) => readJsonFile(fileFor(userId), [])
-    .map((todo) => ({ ...todo, text: toUpperText(todo.text) }));
-  const write = (userId, todos) => writeJsonFile(fileFor(userId), todos);
+function createTodoStore(db) {
+  const list = async (userId) => (await db.query(
+    'SELECT * FROM todos WHERE user_id = $1 ORDER BY created_at DESC, id',
+    [userId],
+  )).map(toTodo);
 
   return {
-    list: read,
+    list,
 
-    add(userId, text, dueDate) {
-      const todos = read(userId);
-      const todo = {
-        id: crypto.randomUUID(),
-        text: toUpperText(text),
-        done: false,
-        dueDate,
-        createdAt: new Date().toISOString(),
-      };
-      todos.unshift(todo);
-      write(userId, todos);
-      return todo;
+    async add(userId, text, dueDate) {
+      const [row] = await db.query(
+        `INSERT INTO todos (id, user_id, text, due_date) VALUES ($1, $2, $3, $4)
+         RETURNING *`,
+        [crypto.randomUUID(), userId, toUpperText(text), dueDate],
+      );
+      return toTodo(row);
     },
 
-    update(userId, id, changes) {
-      const todos = read(userId);
-      const todo = todos.find((item) => item.id === id);
-      if (!todo) return null;
-      Object.assign(todo, changes);
-      todo.text = toUpperText(todo.text);
-      write(userId, todos);
-      return todo;
+    async update(userId, id, changes) {
+      if (!isUuid(id)) return null;
+      const [row] = await db.query(
+        `UPDATE todos SET
+           text     = CASE WHEN $3::boolean THEN $4 ELSE text END,
+           due_date = CASE WHEN $5::boolean THEN $6 ELSE due_date END,
+           done     = CASE WHEN $7::boolean THEN $8::boolean ELSE done END
+         WHERE id = $1 AND user_id = $2
+         RETURNING *`,
+        [
+          id, userId,
+          'text' in changes, 'text' in changes ? toUpperText(changes.text) : null,
+          'dueDate' in changes, changes.dueDate ?? null,
+          'done' in changes, changes.done ?? null,
+        ],
+      );
+      return row ? toTodo(row) : null;
     },
 
-    remove(userId, id) {
-      const todos = read(userId);
-      const remaining = todos.filter((item) => item.id !== id);
-      if (remaining.length === todos.length) return false;
-      write(userId, remaining);
-      return true;
+    async remove(userId, id) {
+      if (!isUuid(id)) return false;
+      const rows = await db.query(
+        'DELETE FROM todos WHERE id = $1 AND user_id = $2 RETURNING id',
+        [id, userId],
+      );
+      return rows.length > 0;
     },
 
-    clearDone(userId) {
-      const remaining = read(userId).filter((item) => !item.done);
-      write(userId, remaining);
-      return remaining;
+    async clearDone(userId) {
+      await db.query('DELETE FROM todos WHERE user_id = $1 AND done', [userId]);
+      return list(userId);
     },
   };
 }
 
 /**
  * Lista de mercado, a única coisa compartilhada entre os usuários. A versão
- * cresce a cada mudança para o cliente ignorar uma resposta mais antiga que
- * chegue depois de uma atualização em tempo real.
+ * cresce a cada mudança: o cliente consulta de tempos em tempos e ignora uma
+ * resposta mais antiga que chegue depois de outra mais nova.
  */
-function createMarketStore(dir) {
-  fs.mkdirSync(dir, { recursive: true });
+function createMarketStore(db) {
+  async function read() {
+    const [items, [meta]] = await Promise.all([
+      db.query('SELECT * FROM market_items ORDER BY created_at DESC, id'),
+      db.query('SELECT version FROM market_meta WHERE id = 1'),
+    ]);
+    return { version: Number(meta.version), items: items.map(toItem) };
+  }
 
-  const file = path.join(dir, 'market.json');
-  // Os itens gravados antes da regra das maiúsculas são convertidos na leitura.
-  const read = () => {
-    const state = readJsonFile(file, { version: 0, items: [] });
-    for (const item of state.items) item.text = toUpperText(item.text);
-    return state;
-  };
-
-  function save(items, version) {
-    const state = { version: version + 1, items };
-    writeJsonFile(file, state);
-    return state;
+  /**
+   * Muda a lista e a versão na mesma instrução: se nada mudou (item que não
+   * existe), a versão fica como está e a resposta é `null`.
+   */
+  async function change(sql, params) {
+    const rows = await db.query(
+      `WITH changed AS (${sql} RETURNING 1)
+       UPDATE market_meta SET version = version + 1
+       WHERE id = 1 AND EXISTS (SELECT 1 FROM changed)
+       RETURNING version`,
+      params,
+    );
+    return rows.length > 0 ? read() : null;
   }
 
   return {
     read,
 
     add(text, addedBy) {
-      const { version, items } = read();
-      const item = {
-        id: crypto.randomUUID(),
-        text: toUpperText(text),
-        bought: false,
-        addedBy,
-        createdAt: new Date().toISOString(),
-      };
-      return save([item, ...items], version);
+      return change(
+        'INSERT INTO market_items (id, text, added_by) VALUES ($1, $2, $3)',
+        [crypto.randomUUID(), toUpperText(text), addedBy],
+      );
     },
 
     setBought(id, bought) {
-      const { version, items } = read();
-      const item = items.find((other) => other.id === id);
-      if (!item) return null;
-      item.bought = bought;
-      return save(items, version);
+      if (!isUuid(id)) return null;
+      return change('UPDATE market_items SET bought = $2 WHERE id = $1', [id, bought]);
     },
 
     remove(id) {
-      const { version, items } = read();
-      const remaining = items.filter((item) => item.id !== id);
-      if (remaining.length === items.length) return null;
-      return save(remaining, version);
+      if (!isUuid(id)) return null;
+      return change('DELETE FROM market_items WHERE id = $1', [id]);
     },
 
-    clearBought() {
-      const { version, items } = read();
-      return save(items.filter((item) => !item.bought), version);
+    async clearBought() {
+      return (await change('DELETE FROM market_items WHERE bought', [])) || read();
     },
   };
 }
 
-module.exports = {
-  createTodoStore,
-  createMarketStore,
-  toUpperText,
-  readJsonFile,
-  writeJsonFile,
-};
+module.exports = { createTodoStore, createMarketStore, toUpperText };

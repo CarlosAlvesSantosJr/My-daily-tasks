@@ -1,18 +1,22 @@
 {
-  "name": "to-do-list",
-  "version": "2.2.0",
+  "name": "dailytasks",
+  "version": "3.0.0",
   "private": true,
-  "description": "Lista de tarefas web com login, uma lista privada por usuário",
+  "description": "Daily Tasks: compromissos privados por usuário e lista de mercado compartilhada. Vercel + Neon Postgres.",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
+    "start:neon": "node --env-file=.env.local server/index.js",
     "test": "node --test"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
-    "web-push": "^4.0.0",
-    "ws": "^8.22.1"
+    "@neondatabase/serverless": "^1.2.1",
+    "web-push": "^4.0.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.16"
   }
 }
